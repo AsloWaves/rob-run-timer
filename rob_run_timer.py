@@ -47,7 +47,51 @@ THEMES = {
     "Paper": dict(bg="#f6f1e7", fg="#2b2b2b", muted="#6d6556", entry="#fffdf7", btn="#e8dfcc", btn_fg="#2b2b2b",
                   accent="#5f7f1f", accent_fg="#ffffff", danger="#b03a2e", timer="#3b3024", ready="#2e7d32",
                   logged="#1565c0", bar="#d9cfb8", bar_fg="#3b3024", bar_hover="#c9bd9f", link="#1565c0", font="Georgia"),
+
+    # ---- design-pass skins: these change the shape of the display, not just the colours ----
+    # Modern: flat, light, quiet. Big thin numerals, one teal accent, hairline cards, slim progress line.
+    "Modern": dict(bg="#e6eaee", panel="#ffffff", screen="#ffffff", fg="#17212b", muted="#6b7885", entry="#f2f5f8",
+                   btn="#e9eef3", btn_fg="#17212b", accent="#0b7285", accent_fg="#ffffff", danger="#c92a2a",
+                   timer="#17212b", ready="#2b8a3e", logged="#1c7ed6", bar="#17212b", bar_fg="#cfd8e0",
+                   bar_hover="#2b3a48", link="#0b7285", font="Segoe UI Light", ui_font="Segoe UI",
+                   style="text", prog="flat", flat=True, panel_bw=1, border="#d3dae1", track="#e3e8ed"),
+    # Rob Run: the game is a gritty urban crime sandbox, so: asphalt, caution-tape yellow, a stamped hazard
+    # plate for the countdown, and police red/blue flashing when a bush is ready.
+    "Rob Run": dict(bg="#1b1c1e", panel="#26272a", screen="#26272a", fg="#ececec", muted="#9a9a9a", entry="#151517",
+                    btn="#34353a", btn_fg="#f2f2f2", accent="#ffc400", accent_fg="#111111", danger="#ff6b6b",
+                    timer="#111111", ready="#ffffff", logged="#7ec8ff", bar="#0e0e0f", bar_fg="#ffc400",
+                    bar_hover="#3a3b40", link="#ffc400", font="Impact", ui_font="Bahnschrift SemiBold",
+                    style="plate", prog="hazard", flat=True, panel_bw=1, border="#3d3e44", track="#111111",
+                    plate="#ffc400", plate_idle="#8a7420", plate_fg="#111111", flash=("#d62828", "#1f4fd8")),
+    # Futuristic: black glass, cyan seven-segment readout, segmented LED progress, thin neon outlines.
+    "Futuristic": dict(bg="#04070c", panel="#09111c", screen="#050b12", fg="#cfeaf2", muted="#5f8794", entry="#0c1826",
+                       btn="#0c1826", btn_fg="#00e5ff", accent="#00e5ff", accent_fg="#02121a", danger="#ff4d6d",
+                       timer="#00e5ff", ready="#9dff00", logged="#b388ff", bar="#02050a", bar_fg="#00b8cc",
+                       bar_hover="#0f2a38", link="#00e5ff", font="Consolas", ui_font="Bahnschrift SemiLight",
+                       style="seg7", seg_off="#0b2a33", prog="segments", flat=True, outline=True, panel_bw=1,
+                       border="#0e6b7a", track="#0b2a33"),
+    # Flip Clock: walnut and brass, split-flap cards with a centre hinge, tick-mark progress rail.
+    "Flip Clock": dict(bg="#2b1d14", panel="#3a281b", screen="#3a281b", fg="#efe3c8", muted="#b79f77", entry="#241810",
+                       btn="#4a3423", btn_fg="#f1e6cc", accent="#b8924a", accent_fg="#1d130c", danger="#ff9a8a",
+                       timer="#f1e8d0", ready="#ffd166", logged="#a5cfa9", bar="#1d130c", bar_fg="#d4b06a",
+                       bar_hover="#4a3423", link="#d4b06a", font="Arial Black", ui_font="Cambria",
+                       style="flip", card="#1d1d20", card2="#141416", card_edge="#0a0a0b", split="#050506",
+                       brass="#b8924a", prog="ticks", flat=False, panel_bw=2, border="#b8924a", track="#241810"),
 }
+
+
+def _fill(name, th):
+    """Give every skin the optional keys, so drawing code can rely on them."""
+    base = dict(name=name, panel=th["bg"], style="text", prog="flat", flat=False, outline=False, panel_bw=0,
+                ui_font="Segoe UI", flash=None)
+    base.update(th)
+    base.setdefault("screen", base["panel"])
+    base.setdefault("border", base["bar"])
+    base.setdefault("track", base["btn"])
+    return base
+
+
+THEMES = {k: _fill(k, v) for k, v in THEMES.items()}
 
 DEF_SETTINGS = {
     "skin": "Dark",                    # one of THEMES
@@ -243,45 +287,247 @@ def single_instance():
         return True
 
 
-def paint(w, th):
-    """Recursively apply skin colours. Widgets can carry a `_role` to get special treatment."""
-    cls, role = w.winfo_class(), getattr(w, "_role", None)
+try:
+    import tkinter as tk
+    import tkinter.font as tkfont
+except Exception:   # the CLI keeps working without Tk
+    tk = tkfont = None
+
+
+def _restyle_font(w, family):
+    """Swap a widget's font family but keep its size and weight."""
+    try:
+        f = tkfont.Font(root=w, font=w.cget("font")).actual()
+        w.config(font=(family, abs(int(f["size"])), f["weight"]))
+    except Exception:
+        pass
+
+
+def paint(w, th, bg=None):
+    """Recursively apply a skin. Widgets can carry a `_role` for special treatment."""
+    bg = bg or th["bg"]
+    cls, role, flat = w.winfo_class(), getattr(w, "_role", None), th["flat"]
     try:
         if cls in ("Frame", "Toplevel", "Tk"):
-            w.config(bg=th["bar"] if role == "bar" else th["bg"])
-            if cls in ("Tk", "Toplevel"):
-                w.config(highlightthickness=1, highlightbackground=th["bar"], highlightcolor=th["bar"])
+            if role == "bar":
+                w.config(bg=th["bar"])
+            elif role == "panel":
+                bg = th["panel"]
+                w.config(bg=bg, highlightthickness=th["panel_bw"], highlightbackground=th["border"],
+                         highlightcolor=th["border"])
+            else:
+                w.config(bg=bg)
+                if cls in ("Tk", "Toplevel"):
+                    w.config(highlightthickness=1, highlightbackground=th["bar"], highlightcolor=th["bar"])
         elif cls == "Labelframe":
-            w.config(bg=th["bg"], fg=th["fg"])
+            w.config(bg=bg, fg=th["fg"])
+            _restyle_font(w, th["ui_font"])
         elif cls == "Label":
-            if role == "bar_text":
+            if role in ("bar_text", "bar_btn"):
                 w.config(bg=th["bar"], fg=th["bar_fg"])
-            elif role == "bar_btn":
-                w.config(bg=th["bar"], fg=th["bar_fg"])
-            elif role == "big":
-                w.config(bg=th["bg"], font=(th["font"], 38))
             elif role == "muted":
-                w.config(bg=th["bg"], fg=th["muted"])
+                w.config(bg=bg, fg=th["muted"])
             elif role == "link":
-                w.config(bg=th["bg"], fg=th["link"])
+                w.config(bg=bg, fg=th["link"])
             else:
-                w.config(bg=th["bg"], fg=th["fg"])
+                w.config(bg=bg, fg=th["fg"])
+            _restyle_font(w, th["ui_font"])
         elif cls == "Button":
-            if role == "accent":
-                w.config(bg=th["accent"], fg=th["accent_fg"], activebackground=th["accent"], activeforeground=th["accent_fg"])
-            elif role == "danger":
-                w.config(bg=th["btn"], fg=th["danger"], activebackground=th["btn"], activeforeground=th["danger"])
+            solid = role in ("accent", "danger")
+            b, f = (th["accent"], th["accent_fg"]) if role == "accent" else \
+                   (th["btn"], th["danger"]) if role == "danger" else (th["btn"], th["btn_fg"])
+            w.config(bg=b, fg=f, activebackground=b if solid else th["entry"], activeforeground=f)
+            if flat:
+                w.config(relief="flat", bd=0, padx=8, pady=3, highlightbackground=th["border"],
+                         highlightcolor=th["accent"], highlightthickness=1 if (th["outline"] and role != "accent") else 0)
             else:
-                w.config(bg=th["btn"], fg=th["btn_fg"], activebackground=th["entry"], activeforeground=th["btn_fg"])
+                w.config(relief="raised", bd=2, padx=6, pady=1, highlightthickness=0)
+            _restyle_font(w, th["ui_font"])
         elif cls == "Entry":
             w.config(bg=th["entry"], fg=th["fg"], insertbackground=th["fg"])
+            if flat:
+                w.config(relief="flat", bd=0, highlightthickness=1, highlightbackground=th["border"],
+                         highlightcolor=th["accent"])
+            else:
+                w.config(relief="sunken", bd=2, highlightthickness=0)
+            _restyle_font(w, th["ui_font"])
         elif cls in ("Checkbutton", "Radiobutton"):
             if role != "chip":
-                w.config(bg=th["bg"], fg=th["fg"], selectcolor=th["entry"], activebackground=th["bg"], activeforeground=th["fg"])
+                w.config(bg=bg, fg=th["fg"], selectcolor=th["entry"], activebackground=bg, activeforeground=th["fg"])
+                _restyle_font(w, th["ui_font"])
+        elif cls == "Canvas" and role == "display":
+            w.config(bg=th["screen"])
     except Exception:
         pass
     for c in w.winfo_children():
-        paint(c, th)
+        paint(c, th, bg)
+
+
+# ---------------------------------------------------------------- the countdown display
+SEGS = {"0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg", "5": "acdfg",
+        "6": "acdefg", "7": "abc", "8": "abcdefg", "9": "abcdfg", "-": "g"}
+
+
+def _seg_poly(n, x, y, w, h, t, g, shear=0.10):
+    """Polygon for one seven-segment bar; shear leans the digit forward."""
+    def hs(yc):
+        x1, x2 = x + t / 2 + g, x + w - t / 2 - g
+        return [(x1, yc), (x1 + t / 2, yc - t / 2), (x2 - t / 2, yc - t / 2), (x2, yc), (x2 - t / 2, yc + t / 2), (x1 + t / 2, yc + t / 2)]
+
+    def vs(xc, y1, y2):
+        return [(xc, y1), (xc + t / 2, y1 + t / 2), (xc + t / 2, y2 - t / 2), (xc, y2), (xc - t / 2, y2 - t / 2), (xc - t / 2, y1 + t / 2)]
+    mid = y + h / 2
+    pts = {"a": hs(y + t / 2), "g": hs(mid), "d": hs(y + h - t / 2),
+           "f": vs(x + t / 2, y + t / 2 + g, mid - g), "b": vs(x + w - t / 2, y + t / 2 + g, mid - g),
+           "e": vs(x + t / 2, mid + g, y + h - t / 2 - g), "c": vs(x + w - t / 2, mid + g, y + h - t / 2 - g)}[n]
+    return [(px + (y + h - py) * shear, py) for px, py in pts]
+
+
+def _clip_x(pts, lo, hi):
+    """Clip a polygon to lo <= x <= hi (Sutherland-Hodgman)."""
+    def clip(pts, inside, xv):
+        out = []
+        for i, p in enumerate(pts):
+            q = pts[i - 1]
+            cross = (xv, q[1] + (p[1] - q[1]) * (xv - q[0]) / (p[0] - q[0])) if p[0] != q[0] else None
+            if inside(p):
+                if not inside(q) and cross: out.append(cross)
+                out.append(p)
+            elif inside(q) and cross:
+                out.append(cross)
+        return out
+    pts = clip(pts, lambda p: p[0] >= lo, lo)
+    return clip(pts, lambda p: p[0] <= hi, hi) if pts else pts
+
+
+def _hazard(cv, x0, y0, x1, y1, c1, c2):
+    """Diagonal caution-tape stripes."""
+    if x1 <= x0:
+        return
+    cv.create_rectangle(x0, y0, x1, y1, fill=c1, outline="")
+    h = y1 - y0
+    period = max(8, h * 1.6)
+    s = x0 - h
+    while s < x1:
+        poly = _clip_x([(s, y1), (s + period / 2, y1), (s + period / 2 + h, y0), (s + h, y0)], x0, x1)
+        if len(poly) >= 3:
+            cv.create_polygon(poly, fill=c2, outline="")
+        s += period
+
+
+if tk:
+    class Display(tk.Canvas):
+        """Countdown readout. The skin's `style` picks how the digits are drawn:
+        text (plain font), plate (hazard plate), seg7 (seven-segment), flip (split-flap cards)."""
+        W, H = 240, 98
+
+        def __init__(self, parent):
+            super().__init__(parent, width=self.W, height=self.H, highlightthickness=0, bd=0)
+            self._role, self._key = "display", None
+
+        def show(self, th, text, state, frac, flash=0):
+            key = (th["name"], text, state, int(frac * self.W), flash if state == "ready" else 0)
+            if key == self._key:
+                return
+            self._key = key
+            self.delete("all")
+            self.config(bg=th["screen"])
+            col = th["ready"] if state == "ready" else th["timer"]
+            getattr(self, "_" + th["style"])(th, text, col, state, flash)
+            self._progress(th, 1.0 if state == "ready" else frac, state)
+
+        def _fit(self, family, text, size, maxw, weight="normal"):
+            while size > 10 and tkfont.Font(root=self, family=family, size=size, weight=weight).measure(text) > maxw:
+                size -= 2
+            return size
+
+        def _text(self, th, text, col, state, flash):
+            size = self._fit(th["font"], text, 40, self.W - 16)
+            self.create_text(self.W / 2, (self.H - 14) / 2 + 2, text=text, fill=col, font=(th["font"], size))
+
+        def _plate(self, th, text, col, state, flash):
+            x0, y0, x1, y1 = 6, 4, self.W - 6, self.H - 16
+            if state == "ready" and th["flash"]:
+                pc, fg = th["flash"][flash % 2], "#ffffff"      # police lights
+            elif state == "idle":
+                pc, fg = th["plate_idle"], th["plate_fg"]
+            else:
+                pc, fg = th["plate"], th["plate_fg"]
+            self.create_rectangle(x0, y0, x1, y1, fill=pc, outline="#000000", width=2)
+            _hazard(self, x0 + 3, y0 + 3, x1 - 3, y0 + 9, "#111111", th["plate"])
+            _hazard(self, x0 + 3, y1 - 9, x1 - 3, y1 - 3, "#111111", th["plate"])
+            size = self._fit(th["font"], text, 34, self.W - 40)
+            self.create_text(self.W / 2, (y0 + y1) / 2, text=text, fill=fg, font=(th["font"], size))
+
+        def _seg7(self, th, text, col, state, flash):
+            if state == "ready":    # seven segments can't spell READY, so use the font
+                return self._text(th, text, col, state, flash)
+            dw, dh, t, gap, cw = 32, 64, 7, 9, 14
+            toks = [("c",) if ch == ":" else ("d", ch) for ch in text if ch == ":" or ch in SEGS]
+            total = sum(cw if k[0] == "c" else dw for k in toks) + gap * (len(toks) - 1)
+            sc = min(1.0, (self.W - 16) / total)
+            x, y = (self.W - total * sc) / 2, 4 + (self.H - 20 - dh * sc) / 2
+            for k in toks:
+                if k[0] == "c":
+                    for fy in (0.3, 0.7):
+                        cy = y + dh * sc * fy
+                        self.create_rectangle(x + cw * sc / 2 - 3 * sc, cy - 3 * sc, x + cw * sc / 2 + 3 * sc, cy + 3 * sc, fill=col, outline="")
+                    x += (cw + gap) * sc
+                else:
+                    for n in "abcdefg":
+                        self.create_polygon(_seg_poly(n, x, y, dw * sc, dh * sc, t * sc, 1.6 * sc),
+                                            fill=col if n in SEGS[k[1]] else th["seg_off"], outline="")
+                    x += (dw + gap) * sc
+
+        def _flip(self, th, text, col, state, flash):
+            cw, chh, gap, colw = 44, 66, 5, 12
+            toks = [("c",) if ch == ":" else ("k", ch) for ch in text]
+            total = sum(colw if k[0] == "c" else cw for k in toks) + gap * (len(toks) - 1)
+            sc = min(1.0, (self.W - 12) / total)
+            w, h = cw * sc, chh * sc
+            x, y = (self.W - total * sc) / 2, 4 + (self.H - 20 - h) / 2
+            for k in toks:
+                if k[0] == "c":
+                    for fy in (0.32, 0.68):
+                        cy = y + h * fy
+                        self.create_rectangle(x + colw * sc / 2 - 3, cy - 3, x + colw * sc / 2 + 3, cy + 3, fill=th["brass"], outline="")
+                    x += (colw + gap) * sc
+                    continue
+                mid = y + h / 2
+                self.create_rectangle(x, y, x + w, mid, fill=th["card"], outline=th["card_edge"])
+                self.create_rectangle(x, mid, x + w, y + h, fill=th["card2"], outline=th["card_edge"])
+                self.create_text(x + w / 2, mid, text=k[1], fill=col, font=(th["font"], -int(h * 0.6)))
+                self.create_line(x, mid, x + w, mid, fill=th["split"], width=2)
+                for hx in (x - 1, x + w - 2):    # hinge pins
+                    self.create_rectangle(hx, mid - 4, hx + 3, mid + 4, fill=th["brass"], outline="")
+                x += (cw + gap) * sc
+
+        def _progress(self, th, frac, state):
+            x0, x1, y0, y1 = 8, self.W - 8, self.H - 11, self.H - 5
+            frac = max(0.0, min(1.0, frac))
+            fill = th["ready"] if state == "ready" else th["accent"]
+            p, span = th["prog"], x1 - x0
+            if p == "flat":
+                self.create_rectangle(x0, y0, x1, y1, fill=th["track"], outline="")
+                if frac > 0:
+                    self.create_rectangle(x0, y0, x0 + span * frac, y1, fill=fill, outline="")
+            elif p == "segments":
+                n = 24
+                sw = (span - (n - 1) * 2) / n
+                for i in range(n):
+                    sx = x0 + i * (sw + 2)
+                    self.create_rectangle(sx, y0, sx + sw, y1, fill=fill if i < int(frac * n + 0.0001) else th["track"], outline="")
+            elif p == "hazard":
+                self.create_rectangle(x0, y0, x1, y1, fill=th["track"], outline="")
+                _hazard(self, x0, y0, x0 + span * frac, y1, "#111111", th["plate"])
+            elif p == "ticks":
+                ym = (y0 + y1) / 2
+                self.create_line(x0, ym, x1, ym, fill=th["track"], width=2)
+                if frac > 0:
+                    self.create_line(x0, ym, x0 + span * frac, ym, fill=th["brass"], width=4)
+                for i in range(11):
+                    tx = x0 + span * i / 10
+                    self.create_line(tx, y0 - (2 if i % 5 == 0 else 0), tx, y1 + (2 if i % 5 == 0 else 0), fill=th["brass"])
 
 
 def gui():
@@ -362,8 +608,10 @@ def gui():
 
     def build_panel(t):
         tid = t["id"]
-        box = tk.LabelFrame(holder, padx=6, pady=4)
+        box = tag(tk.Frame(holder), "panel")
         box.pack(side="left", fill="y", padx=6, pady=6, anchor="n")
+        inner = tk.Frame(box)
+        inner.pack(padx=8, pady=6)
         name = tk.StringVar(value=t["name"])
 
         def upd(fn):
@@ -372,11 +620,11 @@ def gui():
                 fn(st, tt); save(st)
 
         name.trace_add("write", lambda *_: upd(lambda st, tt: tt.__setitem__("name", name.get())))
-        tk.Entry(box, textvariable=name, justify="center", font=("Segoe UI", 10, "bold")).pack(fill="x")
-        big = tag(tk.Label(box, text="--:--"), "big"); big.pack()
-        info = tag(tk.Label(box, text="", font=("Segoe UI", 8)), "muted"); info.pack()
+        tk.Entry(inner, textvariable=name, justify="center", font=("Segoe UI", 10, "bold")).pack(fill="x")
+        disp = Display(inner); disp.pack(pady=(4, 0))
+        info = tag(tk.Label(inner, text="", font=("Segoe UI", 8)), "muted"); info.pack()
         ago = tk.StringVar(value="0")
-        r = tk.Frame(box); r.pack(pady=2)
+        r = tk.Frame(inner); r.pack(pady=2)
         tk.Label(r, text="Harvested").pack(side="left")
         tk.Entry(r, textvariable=ago, width=4).pack(side="left", padx=3)
         tk.Label(r, text="min ago").pack(side="left")
@@ -397,24 +645,24 @@ def gui():
             def f(st, tt): tt["start"] = None; tt["open"] = None
             upd(f)
 
-        tag(tk.Button(box, text="Harvested - start timer", command=start, font=("Segoe UI", 10), height=2),
+        tag(tk.Button(inner, text="Harvested - start timer", command=start, font=("Segoe UI", 10), height=2),
             "accent").pack(fill="x", pady=2)
-        tk.Button(box, text="Actually ready now (log)", command=ready).pack(fill="x")
-        tk.Button(box, text="Reset", command=reset).pack(fill="x", pady=2)
+        tk.Button(inner, text="Actually ready now (log)", command=ready).pack(fill="x")
+        tk.Button(inner, text="Reset", command=reset).pack(fill="x", pady=2)
         vs, cbs = {}, {}
         for u in UP_KEYS:
             vs[u] = tk.BooleanVar(value=u in t["ups"])
             def cb(u=u):
                 upd(lambda st, tt: tt.__setitem__("ups", [k for k in UP_KEYS if vs[k].get()]))
-            cbs[u] = tk.Checkbutton(box, text=UP_NAMES[u], variable=vs[u], command=cb)
+            cbs[u] = tk.Checkbutton(inner, text=UP_NAMES[u], variable=vs[u], command=cb)
             cbs[u].pack(anchor="w")
 
         def remove():
             st = load()
             if len(st["timers"]) > 1:
                 st["timers"] = [x for x in st["timers"] if x["id"] != tid]; save(st)
-        tag(tk.Button(box, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
-        panels[tid] = {"box": box, "big": big, "info": info, "cbs": cbs}
+        tag(tk.Button(inner, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
+        panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs}
         paint(box, cur["th"])
 
     def add_timer():
@@ -577,6 +825,7 @@ def gui():
         for t in st["timers"]:            # add new
             if t["id"] not in panels:
                 build_panel(t)
+        flash = int(time.time() * 2) % 2
         for t in st["timers"]:
             p = panels[t["id"]]
             for u in UP_KEYS:
@@ -586,10 +835,10 @@ def gui():
                 end = t["start"] + mins * 60
                 left = end - time.time()
                 if left > 0:
-                    p["big"].config(text=fmt(left), fg=th["timer"])
+                    p["disp"].show(th, fmt(left), "run", 1 - left / (mins * 60))
                     p["info"].config(text=f"{mins:.1f} min - ready {clock(st, end)}")
                 else:
-                    p["big"].config(text="READY!", fg=th["ready"])
+                    p["disp"].show(th, "READY!", "ready", 1.0, flash)
                     p["info"].config(text=f"since {clock(st, end)}")
                     if not alerted.get(t["id"]):
                         alerted[t["id"]] = True
@@ -598,7 +847,7 @@ def gui():
                         root.deiconify(); root.lift()
             else:
                 last = [c for c in st["cycles"] if c.get("timer") == t["name"]]
-                p["big"].config(text="--:--", fg=th["timer"])
+                p["disp"].show(th, "--:--", "idle", 0.0)
                 p["info"].config(text=f"{mins:.1f} min" + (f" - last logged {last[-1]['minutes']:.2f}" if last else ""))
         root.after(500, tick)
 
