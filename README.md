@@ -13,4 +13,6 @@ python rob_run_timer.py status  # CLI: start | ready | set | status
 ```
 Click **+ Add timer** for tables with different upgrades (each timer has its own name, upgrades and countdown). CLI: `add`, `remove`, `--timer N`.
 
+**Settings** button: 12/24-hour clock, seconds on or off, base time, per-upgrade percentages, default upgrades for new timers, beep and always-on-top. Times display in 12-hour by default.
+
 State is saved in `state.json` (git-ignored, per machine).
