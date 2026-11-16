@@ -15,7 +15,7 @@ CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer
 import argparse, json, os, queue, re, shutil, sys, time
 from datetime import datetime
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 DIR = os.path.dirname(os.path.abspath(__file__))
 # Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
 # ROBRUN_STATE can point somewhere else (testing).
@@ -150,7 +150,20 @@ def load():
         with open(STATE, encoding="utf-8-sig") as f:
             s = json.load(f)
     except Exception:
-        return default()
+        # First run (or an unreadable file): write the defaults straight away. Returning a fresh
+        # default() each call would give the timer a new id every load, and the GUI would rebuild
+        # its panel (and reset the window size) on every tick until something happened to save.
+        if os.path.exists(STATE):
+            try:
+                os.replace(STATE, STATE + ".bad")
+            except Exception:
+                pass
+        s = default()
+        try:
+            save(s)
+        except Exception:
+            pass
+        return s
     if "timers" not in s:  # migrate from single-timer / two-table versions
         if "tables" in s:
             b = s["tables"].get("B", {})
