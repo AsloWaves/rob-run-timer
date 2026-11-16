@@ -54,7 +54,7 @@ THEMES = {
                    btn="#e9eef3", btn_fg="#17212b", accent="#0b7285", accent_fg="#ffffff", danger="#c92a2a",
                    timer="#17212b", ready="#2b8a3e", logged="#1c7ed6", bar="#17212b", bar_fg="#cfd8e0",
                    bar_hover="#2b3a48", link="#0b7285", font="Segoe UI Light", ui_font="Segoe UI",
-                   style="text", prog="flat", flat=True, panel_bw=1, border="#d3dae1", track="#e3e8ed"),
+                   style="text", prog="flat", flat=True, panel_bw=1, border="#d3dae1", track="#e3e8ed", round=12),
     # Rob Run: the game is a gritty urban crime sandbox, so: asphalt, caution-tape yellow, a stamped hazard
     # plate for the countdown, and police red/blue flashing when a bush is ready.
     "Rob Run": dict(bg="#1b1c1e", panel="#26272a", screen="#26272a", fg="#ececec", muted="#9a9a9a", entry="#151517",
@@ -83,7 +83,7 @@ THEMES = {
 def _fill(name, th):
     """Give every skin the optional keys, so drawing code can rely on them."""
     base = dict(name=name, panel=th["bg"], style="text", prog="flat", flat=False, outline=False, panel_bw=0,
-                ui_font="Segoe UI", flash=None)
+                ui_font="Segoe UI", flash=None, round=0)
     base.update(th)
     base.setdefault("screen", base["panel"])
     base.setdefault("border", base["bar"])
@@ -95,6 +95,7 @@ THEMES = {k: _fill(k, v) for k, v in THEMES.items()}
 
 DEF_SETTINGS = {
     "skin": "Dark",                    # one of THEMES
+    "mini": False,                     # clock-only view (just the countdowns)
     "clock": 12,                       # 12 or 24 hour clock for ready times
     "seconds": True,                   # show seconds in clock times
     "beep": True,                      # play a sound when a timer is ready
@@ -306,7 +307,10 @@ def _restyle_font(w, family):
 def paint(w, th, bg=None):
     """Recursively apply a skin. Widgets can carry a `_role` for special treatment."""
     bg = bg or th["bg"]
+    outer = bg
     cls, role, flat = w.winfo_class(), getattr(w, "_role", None), th["flat"]
+    if cls == "Canvas" and role == "panel":
+        bg = th["panel"]
     try:
         if cls in ("Frame", "Toplevel", "Tk"):
             if role == "bar":
@@ -361,6 +365,9 @@ def paint(w, th, bg=None):
         pass
     for c in w.winfo_children():
         paint(c, th, bg)
+    rp = getattr(w, "_rp", None)     # rounded wrappers (RPanel / Btn / REntry) redraw once their children are styled
+    if rp:
+        rp(th, outer)
 
 
 # ---------------------------------------------------------------- the countdown display
@@ -421,10 +428,26 @@ if tk:
         text (plain font), plate (hazard plate), seg7 (seven-segment), flip (split-flap cards)."""
         W, H = 240, 98
 
-        def __init__(self, parent):
-            super().__init__(parent, width=self.W, height=self.H, highlightthickness=0, bd=0)
-            self._role, self._key = "display", None
+        def __init__(self, parent, w=240, h=98):
+            super().__init__(parent, width=w, height=h, highlightthickness=0, bd=0)
+            self._role, self._key, self._last = "display", None, None
+            self.W, self.H = w, h
+            self._geo()
+            self.bind("<Configure>", self._resize)
             self._ftxt, self._ftheme, self._tok, self._wins = None, None, 0, []
+
+        def _geo(self):
+            self._s = max(0.4, min(self.W / 240, self.H / 98))   # everything scales from the 240x98 design size
+            self._bot = max(3, int(6 * self._s))                    # progress bar thickness
+
+        def _resize(self, e):
+            if e.width < 20 or (e.width, e.height) == (self.W, self.H):
+                return
+            self.W, self.H = e.width, e.height
+            self._geo()
+            if self._last:
+                self._key = None
+                self.show(*self._last)
 
         def _clear_wins(self):
             for w in self._wins:
@@ -435,6 +458,7 @@ if tk:
             self._wins = []
 
         def show(self, th, text, state, frac, flash=0):
+            self._last = (th, text, state, frac, flash)
             key = (th["name"], text, state, int(frac * self.W), flash if state == "ready" else 0)
             if key == self._key:
                 return
@@ -474,11 +498,11 @@ if tk:
             return size
 
         def _text(self, th, text, col, state, flash):
-            size = self._fit(th["font"], text, 40, self.W - 16)
-            self.create_text(self.W / 2, (self.H - 14) / 2 + 2, text=text, fill=col, font=(th["font"], size))
+            size = self._fit(th["font"], text, int(40 * self._s), self.W - 16)
+            self.create_text(self.W / 2, (self.H - self._bot - 8) / 2 + 2, text=text, fill=col, font=(th["font"], size))
 
         def _plate(self, th, text, col, state, flash):
-            x0, y0, x1, y1 = 6, 4, self.W - 6, self.H - 16
+            x0, y0, x1, y1 = 6, 4, self.W - 6, self.H - self._bot - 10
             if state == "ready" and th["flash"]:
                 pc, fg = th["flash"][flash % 2], "#ffffff"      # police lights
             elif state == "idle":
@@ -488,7 +512,7 @@ if tk:
             self.create_rectangle(x0, y0, x1, y1, fill=pc, outline="#000000", width=2)
             _hazard(self, x0 + 3, y0 + 3, x1 - 3, y0 + 9, "#111111", th["plate"])
             _hazard(self, x0 + 3, y1 - 9, x1 - 3, y1 - 3, "#111111", th["plate"])
-            size = self._fit(th["font"], text, 34, self.W - 40)
+            size = self._fit(th["font"], text, int(34 * self._s), self.W - int(40 * min(1, self._s)))
             self.create_text(self.W / 2, (y0 + y1) / 2, text=text, fill=fg, font=(th["font"], size))
 
         def _seg7(self, th, text, col, state, flash):
@@ -497,8 +521,9 @@ if tk:
             dw, dh, t, gap, cw = 32, 64, 7, 9, 14
             toks = [("c",) if ch == ":" else ("d", ch) for ch in text if ch == ":" or ch in SEGS]
             total = sum(cw if k[0] == "c" else dw for k in toks) + gap * (len(toks) - 1)
-            sc = min(1.0, (self.W - 16) / total)
-            x, y = (self.W - total * sc) / 2, 4 + (self.H - 20 - dh * sc) / 2
+            av = self.H - self._bot - 14
+            sc = min((self.W - 16) / total, av / dh)
+            x, y = (self.W - total * sc) / 2, 4 + (av - dh * sc) / 2
             for k in toks:
                 if k[0] == "c":
                     for fy in (0.3, 0.7):
@@ -525,10 +550,11 @@ if tk:
             cw, chh, gap, colw = 44, 66, 5, 12
             toks = [("c",) if ch == ":" else ("k", ch) for ch in text]
             total = sum(colw if k[0] == "c" else cw for k in toks) + gap * (len(toks) - 1)
-            sc = min(1.0, (self.W - 12) / total)
+            av = self.H - self._bot - 14
+            sc = min((self.W - 12) / total, av / chh)
             w, h = cw * sc, chh * sc
             self._fh = h
-            x, y = (self.W - total * sc) / 2, 4 + (self.H - 20 - h) / 2
+            x, y = (self.W - total * sc) / 2, 4 + (av - h) / 2
             for idx, k in enumerate(toks):
                 if k[0] == "c":
                     for fy in (0.32, 0.68):
@@ -557,11 +583,17 @@ if tk:
                 x += (cw + gap) * sc
 
         def _progress(self, th, frac, state):
-            x0, x1, y0, y1 = 8, self.W - 8, self.H - 11, self.H - 5
+            x0, x1, y0, y1 = 8, self.W - 8, self.H - 5 - self._bot, self.H - 5
             frac = max(0.0, min(1.0, frac))
             fill = th["ready"] if state == "ready" else th["accent"]
             p, span = th["prog"], x1 - x0
-            if p == "flat":
+            if p == "flat" and th["round"]:
+                ym, lw = (y0 + y1) / 2, y1 - y0
+                self.create_line(x0 + lw / 2, ym, x1 - lw / 2, ym, fill=th["track"], width=lw, capstyle="round")
+                if frac > 0:
+                    self.create_line(x0 + lw / 2, ym, max(x0 + lw / 2, x0 + span * frac - lw / 2), ym,
+                                     fill=fill, width=lw, capstyle="round")
+            elif p == "flat":
                 self.create_rectangle(x0, y0, x1, y1, fill=th["track"], outline="")
                 if frac > 0:
                     self.create_rectangle(x0, y0, x0 + span * frac, y1, fill=fill, outline="")
@@ -582,6 +614,175 @@ if tk:
                 for i in range(11):
                     tx = x0 + span * i / 10
                     self.create_line(tx, y0 - (2 if i % 5 == 0 else 0), tx, y1 + (2 if i % 5 == 0 else 0), fill=th["brass"])
+
+def _rrect(cv, x0, y0, x1, y1, r, **kw):
+    """Rounded rectangle (a plain one when r is 0)."""
+    r = max(0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
+    if r < 1:
+        kw.setdefault("outline", "")
+        return cv.create_rectangle(x0, y0, x1, y1, **kw)
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
+           x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
+if tk:
+    class RPanel(tk.Canvas):
+        """A card whose corners follow the skin's `round` radius. Put children in `.body`."""
+        def __init__(self, parent):
+            super().__init__(parent, highlightthickness=0, bd=0)
+            self._role, self.body, self._th, self._ins = "panel", tk.Frame(self), None, 0
+            self._win = self.create_window(0, 0, window=self.body, anchor="nw")
+            self.body.bind("<Configure>", lambda e: self._size())
+            self.bind("<Configure>", self._stretch)
+
+        def _stretch(self, e):
+            i = self._ins
+            self.itemconfigure(self._win, width=max(1, e.width - 2 * i), height=max(1, e.height - 2 * i))
+            self._draw()
+
+        def _size(self):
+            i = self._ins
+            self._wh = (self.body.winfo_reqwidth() + 2 * i, self.body.winfo_reqheight() + 2 * i)
+            self.config(width=self._wh[0], height=self._wh[1])
+            self.coords(self._win, i, i)
+            self._draw()
+
+        def _draw(self):
+            self.delete("bg")
+            th = self._th
+            if not th or not getattr(self, "_wh", None):
+                return
+            bw = th["panel_bw"]
+            W, H = max(self.winfo_width(), self._wh[0]), max(self.winfo_height(), self._wh[1])
+            _rrect(self, bw / 2, bw / 2, W - bw / 2 - 1, H - bw / 2 - 1, th["round"],
+                   fill=th["panel"], outline=th["border"] if bw else "", width=bw, tags="bg")
+            self.tag_lower("bg")
+
+        def _rp(self, th, outer):
+            self._th, self._ins = th, th["panel_bw"] + th["round"] // 2
+            self.config(bg=outer)
+            self._size()
+
+    class Btn(tk.Canvas):
+        """A tk.Button that draws itself with rounded corners when the skin asks for them."""
+        def __init__(self, parent, **kw):
+            super().__init__(parent, highlightthickness=0, bd=0)
+            self.b = tk.Button(self, **kw)
+            self._win = self.create_window(0, 0, window=self.b, anchor="nw")
+            self._th, self._hov, self._r = None, False, None
+            self.bind("<Configure>", self._conf)
+            self.bind("<Enter>", lambda e: self._hover(True))
+            self.bind("<Leave>", lambda e: self._hover(False))
+            self.bind("<ButtonRelease-1>", self._click)
+
+        @property
+        def _role(self):
+            return self._r
+
+        @_role.setter
+        def _role(self, v):
+            self._r = v
+            self.b._role = v
+
+        def _round(self):
+            return bool(self._th and self._th["round"])
+
+        def _hover(self, on):
+            self._hov = on
+            if self._round():
+                self._draw()
+
+        def _click(self, e):
+            if self._round() and 0 <= e.x < self.winfo_width() and 0 <= e.y < self.winfo_height():
+                self.b.invoke()
+
+        def _conf(self, e):
+            if self._round():
+                self._draw()
+            else:
+                self.itemconfigure(self._win, width=e.width, height=e.height)
+
+        def _draw(self):
+            self.delete("all")
+            b, w, h = self.b, self.winfo_width(), self.winfo_height()
+            if w < 4:
+                return
+            fill = b.cget("activebackground") if self._hov else b.cget("bg")
+            _rrect(self, 0, 0, w - 1, h - 1, self._th["round"], fill=fill)
+            self.create_text(w / 2, h / 2, text=b.cget("text"), fill=b.cget("fg"), font=b.cget("font"))
+
+        def _rp(self, th, outer):
+            self._th = th
+            self.config(bg=outer)
+            self.b.update_idletasks()
+            self.config(width=self.b.winfo_reqwidth(), height=self.b.winfo_reqheight())
+            if th["round"]:
+                self.itemconfigure(self._win, state="hidden")
+                self.config(cursor="hand2")
+                self._draw()
+            else:
+                self.itemconfigure(self._win, state="normal", width=self.winfo_width(), height=self.winfo_height())
+                self.config(cursor="")
+
+    class REntry(tk.Canvas):
+        """A tk.Entry inside a rounded field when the skin asks for rounded corners."""
+        PX, PY = 7, 4
+
+        def __init__(self, parent, **kw):
+            super().__init__(parent, highlightthickness=0, bd=0)
+            self.e = tk.Entry(self, **kw)
+            self._win = self.create_window(0, 0, window=self.e, anchor="nw")
+            self._th, self._focus = None, False
+            self.bind("<Configure>", lambda e: self._layout())
+            self.e.bind("<FocusIn>", lambda e: self._set_focus(True), add="+")
+            self.e.bind("<FocusOut>", lambda e: self._set_focus(False), add="+")
+
+        def get(self):
+            return self.e.get()
+
+        def _set_focus(self, on):
+            self._focus = on
+            if self._th and self._th["round"]:
+                self._layout()
+
+        def _layout(self):
+            w, h = self.winfo_width(), self.winfo_height()
+            self.delete("bg")
+            if w < 4:
+                return
+            if self._th and self._th["round"]:
+                _rrect(self, 0, 0, w - 1, h - 1, self._th["round"], fill=self.e.cget("bg"),
+                       outline=self._th["accent"] if self._focus else self._th["border"], tags="bg")
+                self.tag_lower("bg")
+                self.coords(self._win, self.PX, self.PY)
+                self.itemconfigure(self._win, width=max(1, w - 2 * self.PX), height=max(1, h - 2 * self.PY))
+            else:
+                self.coords(self._win, 0, 0)
+                self.itemconfigure(self._win, width=w, height=h)
+
+        def _rp(self, th, outer):
+            self._th = th
+            self.config(bg=outer)
+            px, py = (self.PX, self.PY) if th["round"] else (0, 0)
+            if th["round"]:
+                self.e.config(bd=0, highlightthickness=0, relief="flat")
+            self.e.update_idletasks()
+            self.config(width=self.e.winfo_reqwidth() + 2 * px, height=self.e.winfo_reqheight() + 2 * py)
+            self._layout()
+
+
+def set_corners(win, rounded):
+    """Ask Windows 11 to round (or not) the outer corners of a top-level window."""
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        v = ctypes.c_int(2 if rounded else 1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(v), 4)
+    except Exception:
+        pass
+
 
 
 def gui():
@@ -634,6 +835,7 @@ def gui():
             b.bind("<Leave>", lambda e: b.config(bg=cur["th"]["bar"]))
         small_btn("✕", root.destroy, "#c42b1c")
         small_btn("–", minimize, None)
+        small_btn("▭", lambda: toggle_mini(), None)
 
         def taskbar():   # keep a taskbar button even though the window is borderless
             try:
@@ -656,16 +858,18 @@ def gui():
     def set_skin(name):
         cur["name"], cur["th"] = name, THEMES[name]
         paint(root, cur["th"])
+        set_corners(root, cur["th"]["round"])
         w = settings_win["w"]
         if w is not None and w.winfo_exists():
             paint(w, cur["th"])
+            set_corners(w, cur["th"]["round"])
 
     def build_panel(t):
         tid = t["id"]
-        box = tag(tk.Frame(holder), "panel")
-        box.pack(side="left", fill="y", padx=6, pady=6, anchor="n")
-        inner = tk.Frame(box)
-        inner.pack(padx=8, pady=6)
+        box = RPanel(holder)
+        box.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+        inner = tk.Frame(box.body)
+        inner.pack(fill="both", expand=True, padx=8, pady=6)
         name = tk.StringVar(value=t["name"])
 
         def upd(fn):
@@ -674,13 +878,13 @@ def gui():
                 fn(st, tt); save(st)
 
         name.trace_add("write", lambda *_: upd(lambda st, tt: tt.__setitem__("name", name.get())))
-        tk.Entry(inner, textvariable=name, justify="center", font=("Segoe UI", 10, "bold")).pack(fill="x")
-        disp = Display(inner); disp.pack(pady=(4, 0))
+        REntry(inner, textvariable=name, justify="center", font=("Segoe UI", 10, "bold")).pack(fill="x")
+        disp = Display(inner); disp.pack(fill="both", expand=True, pady=(4, 0))
         info = tag(tk.Label(inner, text="", font=("Segoe UI", 8)), "muted"); info.pack()
         ago = tk.StringVar(value="0")
         r = tk.Frame(inner); r.pack(pady=2)
         tk.Label(r, text="Harvested").pack(side="left")
-        tk.Entry(r, textvariable=ago, width=4).pack(side="left", padx=3)
+        REntry(r, textvariable=ago, width=4).pack(side="left", padx=3)
         tk.Label(r, text="min ago").pack(side="left")
 
         def start():
@@ -699,10 +903,10 @@ def gui():
             def f(st, tt): tt["start"] = None; tt["open"] = None
             upd(f)
 
-        tag(tk.Button(inner, text="Harvested - start timer", command=start, font=("Segoe UI", 10), height=2),
+        tag(Btn(inner, text="Harvested - start timer", command=start, font=("Segoe UI", 10), height=2),
             "accent").pack(fill="x", pady=2)
-        tk.Button(inner, text="Actually ready now (log)", command=ready).pack(fill="x")
-        tk.Button(inner, text="Reset", command=reset).pack(fill="x", pady=2)
+        Btn(inner, text="Actually ready now (log)", command=ready).pack(fill="x")
+        Btn(inner, text="Reset", command=reset).pack(fill="x", pady=2)
         vs, cbs = {}, {}
         for u in UP_KEYS:
             vs[u] = tk.BooleanVar(value=u in t["ups"])
@@ -715,7 +919,7 @@ def gui():
             st = load()
             if len(st["timers"]) > 1:
                 st["timers"] = [x for x in st["timers"] if x["id"] != tid]; save(st)
-        tag(tk.Button(inner, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
+        tag(Btn(inner, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
         panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs}
         paint(box, cur["th"])
 
@@ -740,7 +944,7 @@ def gui():
 
         def done():
             st = load(); st["settings"]["welcomed"] = True; save(st); w.destroy()
-        tk.Button(w, text="Got it", command=done, width=12).pack(pady=(0, 12))
+        Btn(w, text="Got it", command=done, width=12).pack(pady=(0, 12))
         w.protocol("WM_DELETE_WINDOW", done)
         paint(w, cur["th"])
 
@@ -787,7 +991,7 @@ def gui():
         row = tk.Frame(gf); row.pack(anchor="w")
         tk.Label(row, text="Base time, no upgrades (min):").pack(side="left")
         base = tk.StringVar(value=f"{st0['base']:g}")
-        tk.Entry(row, textvariable=base, width=7).pack(side="left", padx=4)
+        REntry(row, textvariable=base, width=7).pack(side="left", padx=4)
 
         def base_changed(*_):
             try: v = float(base.get())
@@ -799,7 +1003,7 @@ def gui():
             r = tk.Frame(gf); r.pack(anchor="w")
             tk.Label(r, text=f"{UP_NAMES[u]} cuts time by (%):", width=26, anchor="w").pack(side="left")
             pvars[u] = tk.StringVar(value=f"{S['pct'][u]:g}")
-            tk.Entry(r, textvariable=pvars[u], width=7).pack(side="left", padx=4)
+            REntry(r, textvariable=pvars[u], width=7).pack(side="left", padx=4)
 
             def pchanged(*_, u=u):
                 try: v = float(pvars[u].get())
@@ -836,9 +1040,9 @@ def gui():
 
         def default_sound():
             commit(lambda st: st["settings"].__setitem__("sound_path", "")); snd.set("Built-in beep")
-        tk.Button(sf, text="Choose...", command=choose_sound).pack(side="left")
-        tk.Button(sf, text="Test", command=lambda: play_alert(load()["settings"]["sound_path"])).pack(side="left", padx=2)
-        tk.Button(sf, text="Default", command=default_sound).pack(side="left")
+        Btn(sf, text="Choose...", command=choose_sound).pack(side="left")
+        Btn(sf, text="Test", command=lambda: play_alert(load()["settings"]["sound_path"])).pack(side="left", padx=2)
+        Btn(sf, text="Default", command=default_sound).pack(side="left")
         tk.Checkbutton(af, text="Keep window on top of other windows", variable=top,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("topmost", top.get()))).pack(anchor="w")
         cb_var = tk.BooleanVar(value=S.get("compact_bar", True))
@@ -854,17 +1058,81 @@ def gui():
             set_skin(DEF_SETTINGS["skin"])
             w.destroy(); open_settings()
         bf = tk.Frame(w); bf.pack(fill="x", padx=10, pady=(4, 2))
-        tk.Button(bf, text="Restore defaults", command=restore).pack(side="left")
-        tk.Button(bf, text="Close", command=w.destroy).pack(side="right")
+        Btn(bf, text="Restore defaults", command=restore).pack(side="left")
+        Btn(bf, text="Close", command=w.destroy).pack(side="right")
         tag(tk.Label(w, text=f"Rob Run Harvest Timer v{VERSION}  -  unofficial fan tool, not affiliated with the "
                              "ROB RUN developer", font=("Segoe UI", 7)), "muted").pack(pady=(0, 8))
         paint(w, cur["th"])
 
     bottom = tk.Frame(root); bottom.pack(side="bottom", fill="x", pady=(0, 6))
-    tk.Button(bottom, text="+ Add timer", command=add_timer).pack(side="left", padx=8)
-    tk.Button(bottom, text="Settings", command=open_settings).pack(side="right", padx=8)
+    Btn(bottom, text="+ Add timer", command=add_timer).pack(side="left", padx=8)
+    Btn(bottom, text="Settings", command=open_settings).pack(side="right", padx=(0, 22))
+    Btn(bottom, text="Clock only", command=lambda: toggle_mini()).pack(side="right", padx=6)
 
-    def tick():
+    # ---------------------------------------------------------------- clock-only view + window resizing
+    minibox = tk.Frame(root)
+    minis, view, saved = {}, {"mini": None}, {}
+    mdrag = {}
+
+    def mpress(e): mdrag["x"], mdrag["y"] = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
+    def mmove(e): root.geometry(f"+{e.x_root - mdrag['x']}+{e.y_root - mdrag['y']}")
+
+    def apply_view(mini):
+        if view["mini"] == mini:
+            return
+        if view["mini"] is not None:
+            saved[view["mini"]] = (root.winfo_width(), root.winfo_height())
+        if mini:
+            holder.pack_forget(); bottom.pack_forget()
+            minibox.pack(side="top", fill="both", expand=True)
+        else:
+            minibox.pack_forget()
+            bottom.pack(side="bottom", fill="x", pady=(0, 6))
+            holder.pack(side="top", fill="both", expand=True)
+        root.geometry("")
+        if saved.get(mini):
+            root.geometry("%dx%d" % saved[mini])
+        view["mini"] = mini
+
+    def toggle_mini():
+        st = load()
+        st["settings"]["mini"] = not st["settings"].get("mini", False)
+        save(st)
+        refresh()
+
+    def ensure_mini(t, many):
+        m = minis.get(t["id"])
+        if m is None:
+            f = tk.Frame(minibox)
+            f.pack(side="left", fill="both", expand=True, padx=3, pady=3)
+            lbl = tag(tk.Label(f, text="", font=("Segoe UI", 7)), "muted")
+            d = Display(f, 150, 58)
+            d.pack(side="bottom", fill="both", expand=True)
+            for wdg in (f, lbl, d):
+                wdg.bind("<ButtonPress-1>", mpress); wdg.bind("<B1-Motion>", mmove)
+                wdg.bind("<Double-Button-1>", lambda e: toggle_mini())
+            m = minis[t["id"]] = {"f": f, "lbl": lbl, "d": d}
+            paint(f, cur["th"])
+        if many:
+            if not m["lbl"].winfo_manager():
+                m["lbl"].pack(side="top", anchor="w", before=m["d"])
+            m["lbl"].config(text=t["name"])
+        elif m["lbl"].winfo_manager():
+            m["lbl"].pack_forget()
+        return m["d"]
+
+    grip = tag(tk.Label(root, text="◢", font=("Segoe UI", 8), cursor="size_nw_se"), "muted")
+    grip.place(relx=1.0, rely=1.0, anchor="se")
+    gd = {}
+
+    def gpress(e): gd.update(x=e.x_root, y=e.y_root, w=root.winfo_width(), h=root.winfo_height())
+    def gmove(e):
+        nw = max(root.winfo_reqwidth(), gd["w"] + e.x_root - gd["x"])
+        nh = max(root.winfo_reqheight(), gd["h"] + e.y_root - gd["y"])
+        root.geometry(f"{nw}x{nh}")
+    grip.bind("<ButtonPress-1>", gpress); grip.bind("<B1-Motion>", gmove)
+
+    def refresh():
         st = load()
         cfg = st["settings"]
         th = cur["th"]
@@ -873,26 +1141,36 @@ def gui():
         if topmost["v"] != cfg["topmost"]:
             topmost["v"] = cfg["topmost"]; root.attributes("-topmost", cfg["topmost"])
         ids = [t["id"] for t in st["timers"]]
+        changed = False
         for tid in list(panels):          # drop removed
             if tid not in ids:
-                panels.pop(tid)["box"].destroy()
+                panels.pop(tid)["box"].destroy(); changed = True
+        for tid in list(minis):
+            if tid not in ids:
+                minis.pop(tid)["f"].destroy(); changed = True
         for t in st["timers"]:            # add new
             if t["id"] not in panels:
-                build_panel(t)
+                build_panel(t); changed = True
+        mini = bool(cfg.get("mini"))
+        apply_view(mini)
+        if changed:
+            root.geometry("")
         flash = int(time.time() * 2) % 2
+        many = len(st["timers"]) > 1
         for t in st["timers"]:
             p = panels[t["id"]]
             for u in UP_KEYS:
                 p["cbs"][u].config(text=f"{UP_NAMES[u]} -{cfg['pct'][u]:g}%")
             mins = minutes(st, t)
+            disp = ensure_mini(t, many) if mini else p["disp"]
             if t["start"]:
                 end = t["start"] + mins * 60
                 left = end - time.time()
                 if left > 0:
-                    p["disp"].show(th, fmt(left), "run", 1 - left / (mins * 60))
+                    disp.show(th, fmt(left), "run", 1 - left / (mins * 60))
                     p["info"].config(text=f"{mins:.1f} min - ready {clock(st, end)}")
                 else:
-                    p["disp"].show(th, "READY!", "ready", 1.0, flash)
+                    disp.show(th, "READY!", "ready", 1.0, flash)
                     p["info"].config(text=f"since {clock(st, end)}")
                     if not alerted.get(t["id"]):
                         alerted[t["id"]] = True
@@ -901,8 +1179,12 @@ def gui():
                         root.deiconify(); root.lift()
             else:
                 last = [c for c in st["cycles"] if c.get("timer") == t["name"]]
-                p["disp"].show(th, "--:--", "idle", 0.0)
+                disp.show(th, "--:--", "idle", 0.0)
                 p["info"].config(text=f"{mins:.1f} min" + (f" - last logged {last[-1]['minutes']:.2f}" if last else ""))
+        grip.lift()
+
+    def tick():
+        refresh()
         root.after(500, tick)
 
     set_skin(cur["name"])

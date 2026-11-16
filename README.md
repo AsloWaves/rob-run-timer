@@ -15,7 +15,9 @@ Fan -12%, Water Pump -14%, UV Lamp -24%.
 Fan + Pump = 44.4 min. All three = 30 min (UV Lamp value not yet verified in game; editable in Settings).
 
 ## Settings
-- **Skin**: Classic, Dark, Forest, Ocean, Synthwave, Paper, plus four design-pass skins that change how the countdown is drawn: **Modern** (flat, thin numerals), **Rob Run** (hazard-plate readout, flashes police red/blue when ready), **Futuristic** (seven-segment LED readout), **Flip Clock** (split-flap cards on walnut and brass). Every skin also has a progress bar.
+- **Skin**: Classic, Dark, Forest, Ocean, Synthwave, Paper, plus four design-pass skins that change how the countdown is drawn: **Modern** (flat, thin numerals), **Rob Run** (hazard-plate readout, flashes police red/blue when ready), **Futuristic** (seven-segment LED readout), **Flip Clock** (split-flap cards on walnut and brass). Modern also has rounded corners. Every skin also has a progress bar.
+- **Clock only** mode (title-bar ▭ button or bottom bar; double-click the clock to go back): just the countdowns, small enough to park in a screen corner.
+- Resizable: drag the ◢ in the bottom-right corner; the countdowns scale with the window.
 - 12-hour or 24-hour clock, seconds on or off.
 - Base time and the percentage each upgrade cuts.
 - Default upgrades for new timers.
