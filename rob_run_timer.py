@@ -15,7 +15,7 @@ CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer
 import argparse, json, os, queue, re, shutil, sys, time
 from datetime import datetime
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 DIR = os.path.dirname(os.path.abspath(__file__))
 # Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
 # ROBRUN_STATE can point somewhere else (testing).
@@ -292,8 +292,31 @@ REPO = "AsloWaves/rob-run-timer"     # where the update checker looks for newer 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
+AUMID = "RobRunTimer.HarvestTimer"
+
+
+def toast_identity():
+    """Register the app's own name and icon for notifications (per user, no admin needed)."""
+    if toast_identity.done:
+        return
+    toast_identity.done = True
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Software\\Classes\\AppUserModelId\\" + AUMID) as k:
+            winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, "Rob Run Harvest Timer")
+            ico = os.path.join(getattr(sys, "_MEIPASS", DIR), "assets", "icon.ico")
+            if os.path.isfile(ico):
+                winreg.SetValueEx(k, "IconUri", 0, winreg.REG_SZ, ico)
+    except Exception:
+        pass
+
+
+toast_identity.done = False
+
+
 def toast(title, body):
     """Windows toast notification via PowerShell (no extra packages). Fire and forget."""
+    toast_identity()
     ps = ("[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
           "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1);"
           "$x=$t.GetElementsByTagName('text');"
@@ -301,11 +324,11 @@ def toast(title, body):
           "$x.Item(1).AppendChild($t.CreateTextNode($env:RR_BODY)) | Out-Null;"
           "$n=[Windows.UI.Notifications.ToastNotification]::new($t);"
           "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
-          "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($n)")
+          "$env:RR_AUMID).Show($n)")
     try:
         import subprocess
         subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-                         env=dict(os.environ, RR_TITLE=title, RR_BODY=body), creationflags=0x08000000,
+                         env=dict(os.environ, RR_TITLE=title, RR_BODY=body, RR_AUMID=AUMID), creationflags=0x08000000,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
