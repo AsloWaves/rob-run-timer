@@ -424,17 +424,49 @@ if tk:
         def __init__(self, parent):
             super().__init__(parent, width=self.W, height=self.H, highlightthickness=0, bd=0)
             self._role, self._key = "display", None
+            self._ftxt, self._ftheme, self._tok, self._wins = None, None, 0, []
+
+        def _clear_wins(self):
+            for w in self._wins:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            self._wins = []
 
         def show(self, th, text, state, frac, flash=0):
             key = (th["name"], text, state, int(frac * self.W), flash if state == "ready" else 0)
             if key == self._key:
                 return
             self._key = key
+            self._tok += 1
+            self._clear_wins()
             self.delete("all")
             self.config(bg=th["screen"])
             col = th["ready"] if state == "ready" else th["timer"]
+            old, self._ftxt = self._ftxt, text
+            prev_theme, self._ftheme = self._ftheme, th["name"]
+            if th["style"] == "flip" and old and prev_theme == th["name"] and len(old) == len(text) and old != text:
+                self._anim(th, old, text, col, state, flash, frac, 0, self._tok)
+                return
             getattr(self, "_" + th["style"])(th, text, col, state, flash)
             self._progress(th, 1.0 if state == "ready" else frac, state)
+
+        FLIP_FRAMES, FLIP_MS = 10, 32
+
+        def _anim(self, th, old, new, col, state, flash, frac, i, tok):
+            if tok != self._tok:
+                return
+            try:
+                self._clear_wins()
+                self.delete("all")
+                n = self.FLIP_FRAMES
+                self._flip(th, new, col, state, flash, (old, i / n) if i < n else None)
+                self._progress(th, 1.0 if state == "ready" else frac, state)
+                if i < n:
+                    self.after(self.FLIP_MS, lambda: self._anim(th, old, new, col, state, flash, frac, i + 1, tok))
+            except tk.TclError:
+                pass
 
         def _fit(self, family, text, size, maxw, weight="normal"):
             while size > 10 and tkfont.Font(root=self, family=family, size=size, weight=weight).measure(text) > maxw:
@@ -479,14 +511,25 @@ if tk:
                                             fill=col if n in SEGS[k[1]] else th["seg_off"], outline="")
                     x += (dw + gap) * sc
 
-        def _flip(self, th, text, col, state, flash):
+        def _half(self, th, x, y, w, hh, ch, col, top):
+            """One clipped half of a card, as a tiny child canvas (tk can't clip text on a canvas)."""
+            if hh < 1.5:
+                return
+            c = tk.Canvas(self, width=max(1, int(w)), height=max(1, int(hh)), highlightthickness=1,
+                          highlightbackground=th["card_edge"], bg=th["card"] if top else th["card2"], bd=0)
+            c.create_text(w / 2, hh if top else 0, text=ch, fill=col, font=(th["font"], -int(self._fh * 0.6)))
+            self._wins.append(c)
+            self.create_window(x, y - hh if top else y, window=c, anchor="nw")
+
+        def _flip(self, th, text, col, state, flash, anim=None):
             cw, chh, gap, colw = 44, 66, 5, 12
             toks = [("c",) if ch == ":" else ("k", ch) for ch in text]
             total = sum(colw if k[0] == "c" else cw for k in toks) + gap * (len(toks) - 1)
             sc = min(1.0, (self.W - 12) / total)
             w, h = cw * sc, chh * sc
+            self._fh = h
             x, y = (self.W - total * sc) / 2, 4 + (self.H - 20 - h) / 2
-            for k in toks:
+            for idx, k in enumerate(toks):
                 if k[0] == "c":
                     for fy in (0.32, 0.68):
                         cy = y + h * fy
@@ -494,9 +537,20 @@ if tk:
                     x += (colw + gap) * sc
                     continue
                 mid = y + h / 2
-                self.create_rectangle(x, y, x + w, mid, fill=th["card"], outline=th["card_edge"])
-                self.create_rectangle(x, mid, x + w, y + h, fill=th["card2"], outline=th["card_edge"])
-                self.create_text(x + w / 2, mid, text=k[1], fill=col, font=(th["font"], -int(h * 0.6)))
+                if anim and anim[0][idx] != k[1]:
+                    old, t = anim[0][idx], anim[1]
+                    h2 = h / 2
+                    # resting halves: new digit above the hinge, old digit below it
+                    self._half(th, x, mid, w, h2, k[1], col, True)
+                    self._half(th, x, mid, w, h2, old, col, False)
+                    if t < 0.5:     # old top flap falls toward the hinge
+                        self._half(th, x, mid, w, h2 * (1 - 2 * t), old, col, True)
+                    else:           # new bottom flap lands below the hinge
+                        self._half(th, x, mid, w, h2 * (2 * t - 1), k[1], col, False)
+                else:
+                    self.create_rectangle(x, y, x + w, mid, fill=th["card"], outline=th["card_edge"])
+                    self.create_rectangle(x, mid, x + w, y + h, fill=th["card2"], outline=th["card_edge"])
+                    self.create_text(x + w / 2, mid, text=k[1], fill=col, font=(th["font"], -int(h * 0.6)))
                 self.create_line(x, mid, x + w, mid, fill=th["split"], width=2)
                 for hx in (x - 1, x + w - 2):    # hinge pins
                     self.create_rectangle(hx, mid - 4, hx + 3, mid + 4, fill=th["brass"], outline="")
