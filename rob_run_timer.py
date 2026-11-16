@@ -785,6 +785,12 @@ def set_corners(win, rounded):
 
 
 
+def dbg(msg):
+    if os.environ.get("ROBRUN_DEBUG"):
+        with open(os.environ["ROBRUN_DEBUG"], "a") as f:
+            f.write("%.2f %s\n" % (time.time() % 1000, msg))
+
+
 def gui():
     import tkinter as tk
     if not single_instance():
@@ -817,20 +823,32 @@ def gui():
         for wdg in (bar, ttl):
             wdg.bind("<ButtonPress-1>", press); wdg.bind("<B1-Motion>", move)
 
+        away = {"v": False}      # True from the moment we iconify until the window is restored
+
         def minimize():
-            root.overrideredirect(False); root.iconify()
-        restoring = {"v": False}
+            # A borderless (overrideredirect) window can't be iconified, so give it a normal frame first.
+            # Doing that makes Windows remap the window, which must not be mistaken for a restore.
+            dbg("minimize() called")
+            root.overrideredirect(False)
+            root.update_idletasks()
+
+            def go():
+                away["v"] = True
+                root.iconify()
+                dbg("iconify issued; state=%s" % root.state())
+            root.after(80, go)
 
         def on_map(e):
-            if e.widget is root and not restoring["v"] and not root.overrideredirect():
-                restoring["v"] = True
-                root.after(50, lambda: (root.overrideredirect(True), restoring.update(v=False), taskbar()))
+            if e.widget is root and away["v"] and not root.overrideredirect():
+                away["v"] = False       # genuinely restored from the taskbar: go borderless again
+                dbg("restored; re-applying borderless")
+                root.after(50, lambda: (root.overrideredirect(True), taskbar()))
         root.bind("<Map>", on_map)
 
         def small_btn(text, cmd, hover):
             b = tag(tk.Label(bar, text=text, font=("Segoe UI", 8), width=3), "bar_btn")
             b.pack(side="right", fill="y")
-            b.bind("<Button-1>", lambda e: cmd())
+            b.bind("<Button-1>", lambda e: (dbg("click on %r" % text), cmd()))
             b.bind("<Enter>", lambda e: b.config(bg=hover or cur["th"]["bar_hover"]))
             b.bind("<Leave>", lambda e: b.config(bg=cur["th"]["bar"]))
         small_btn("✕", root.destroy, "#c42b1c")
