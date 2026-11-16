@@ -11,4 +11,6 @@ Fan+Pump = 44.4 min, all three = 30 min.
 pythonw rob_run_timer.py        # GUI (Windows; use python on other OSes)
 python rob_run_timer.py status  # CLI: start | ready | set | status
 ```
+Click **+ Add timer** for tables with different upgrades (each timer has its own name, upgrades and countdown). CLI: `add`, `remove`, `--timer N`.
+
 State is saved in `state.json` (git-ignored, per machine).
