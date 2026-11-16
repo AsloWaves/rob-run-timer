@@ -22,7 +22,8 @@ UP_NAMES = {"fan": "Fan", "pump": "Water Pump", "uv": "UV Lamp"}
 DEF_SETTINGS = {
     "clock": 12,                       # 12 or 24 hour clock for ready times
     "seconds": True,                   # show seconds in clock times
-    "beep": True,                      # beep when a timer is ready
+    "beep": True,                      # play a sound when a timer is ready
+    "sound_path": "",                  # custom finish sound (.wav/.mp3/.wma); empty = built-in beep
     "topmost": True,                   # keep window above the game
     "compact_bar": True,               # slim custom title bar with small buttons (restart to apply)
     "default_ups": ["fan", "pump"],    # upgrades pre-ticked on newly added timers
@@ -88,6 +89,23 @@ def clock(s, ts):
         return d.strftime("%H:%M:%S" if cfg["seconds"] else "%H:%M")
     out = d.strftime("%I:%M:%S %p" if cfg["seconds"] else "%I:%M %p")
     return out.lstrip("0")
+
+
+def play_alert(path=""):
+    """Play the user's chosen sound (wav/mp3/wma via Windows MCI, no extra packages); fall back to a beep."""
+    try:
+        if path and os.path.isfile(path):
+            import ctypes
+            mci = ctypes.windll.winmm.mciSendStringW
+            mci("close rrsnd", None, 0, 0)
+            kind = {".mp3": "mpegvideo", ".wma": "mpegvideo", ".wav": "waveaudio"}.get(os.path.splitext(path)[1].lower(), "")
+            opened = mci(f'open "{path}" ' + (f"type {kind} " if kind else "") + "alias rrsnd", None, 0, 0)
+            if opened == 0 and mci("play rrsnd", None, 0, 0) == 0:
+                return
+        import winsound
+        winsound.Beep(1000, 400); winsound.Beep(1400, 400)
+    except Exception:
+        pass
 
 
 def find(s, tid):
@@ -336,8 +354,26 @@ def gui():
         # --- window / alerts
         af = tk.LabelFrame(w, text="Window and alerts", padx=8, pady=4); af.pack(fill="x", padx=10, pady=4)
         beep = tk.BooleanVar(value=S["beep"]); top = tk.BooleanVar(value=S["topmost"])
-        tk.Checkbutton(af, text="Beep when a timer is ready", variable=beep,
+        tk.Checkbutton(af, text="Play a sound when a timer is ready", variable=beep,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("beep", beep.get()))).pack(anchor="w")
+        sf = tk.Frame(af); sf.pack(anchor="w", fill="x")
+        snd = tk.StringVar(value=os.path.basename(S["sound_path"]) or "Built-in beep")
+        tk.Label(sf, text="Sound:").pack(side="left")
+        tk.Label(sf, textvariable=snd, width=20, anchor="w", fg="#06c").pack(side="left", padx=4)
+
+        def choose_sound():
+            from tkinter import filedialog
+            p = filedialog.askopenfilename(parent=w, title="Choose a finish sound",
+                                           filetypes=[("Audio (wav, mp3, wma)", "*.wav *.mp3 *.wma"), ("All files", "*.*")])
+            if p:
+                commit(lambda st: st["settings"].__setitem__("sound_path", p))
+                snd.set(os.path.basename(p)); play_alert(p)
+
+        def default_sound():
+            commit(lambda st: st["settings"].__setitem__("sound_path", "")); snd.set("Built-in beep")
+        tk.Button(sf, text="Choose...", command=choose_sound).pack(side="left")
+        tk.Button(sf, text="Test", command=lambda: play_alert(load()["settings"]["sound_path"])).pack(side="left", padx=2)
+        tk.Button(sf, text="Default", command=default_sound).pack(side="left")
         tk.Checkbutton(af, text="Keep window on top of other windows", variable=top,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("topmost", top.get()))).pack(anchor="w")
 
@@ -388,9 +424,7 @@ def gui():
                     if not alerted.get(t["id"]):
                         alerted[t["id"]] = True
                         if cfg["beep"]:
-                            try:
-                                import winsound; winsound.Beep(1000, 400); winsound.Beep(1400, 400)
-                            except Exception: pass
+                            play_alert(cfg["sound_path"])
                         root.deiconify(); root.lift()
             else:
                 last = [c for c in st["cycles"] if c.get("timer") == t["name"]]
