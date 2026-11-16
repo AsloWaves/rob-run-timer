@@ -12,10 +12,10 @@ CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer
        python rob_run_timer.py remove --timer N
        python rob_run_timer.py status
 """
-import argparse, json, os, shutil, sys, time
+import argparse, json, os, queue, re, shutil, sys, time
 from datetime import datetime
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DIR = os.path.dirname(os.path.abspath(__file__))
 # Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
 # ROBRUN_STATE can point somewhere else (testing).
@@ -105,6 +105,16 @@ DEF_SETTINGS = {
     "welcomed": False,                 # first-run welcome already shown
     "default_ups": ["fan", "pump"],    # upgrades pre-ticked on newly added timers
     "pct": {"fan": 12, "pump": 14, "uv": 24},   # time cut per upgrade, in percent
+    "verified": ["fan", "pump"],       # upgrades whose % is confirmed in game (UV is still an estimate)
+    "toast": True,                     # Windows notification when a timer is ready / about to be
+    "flash": True,                     # flash the taskbar button when a timer is ready
+    "warn_min": 2,                     # early warning this many minutes before ready (0 = off)
+    "hotkeys": {"next": "Ctrl+Alt+H", "all": "Ctrl+Alt+A", "mini": "Ctrl+Alt+M", "through": "Ctrl+Alt+C"},
+    "opacity": 100,                    # window opacity in percent
+    "clickthrough": False,             # clock-only view ignores the mouse (toggle with its hotkey)
+    "check_updates": True,             # look for a newer release on GitHub at start-up
+    "pos": None,                       # last window position [x, y]
+    "size": {},                        # last window size per view
 }
 DEF_BASE = 60.0
 
@@ -153,6 +163,7 @@ def load():
     out = {**default(), **s}
     st = {**json.loads(json.dumps(DEF_SETTINGS)), **s.get("settings", {})}
     st["pct"] = {**DEF_SETTINGS["pct"], **st.get("pct", {})}
+    st["hotkeys"] = {**DEF_SETTINGS["hotkeys"], **st.get("hotkeys", {})}
     if st["skin"] not in THEMES:
         st["skin"] = DEF_SETTINGS["skin"]
     out["settings"] = st
@@ -276,6 +287,217 @@ def cli(a):
     status(load())
 
 
+# ---------------------------------------------------------------- Windows helpers: alerts, hotkeys, startup, updates
+REPO = "AsloWaves/rob-run-timer"     # where the update checker looks for newer releases
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def toast(title, body):
+    """Windows toast notification via PowerShell (no extra packages). Fire and forget."""
+    ps = ("[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
+          "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1);"
+          "$x=$t.GetElementsByTagName('text');"
+          "$x.Item(0).AppendChild($t.CreateTextNode($env:RR_TITLE)) | Out-Null;"
+          "$x.Item(1).AppendChild($t.CreateTextNode($env:RR_BODY)) | Out-Null;"
+          "$n=[Windows.UI.Notifications.ToastNotification]::new($t);"
+          "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+          "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($n)")
+    try:
+        import subprocess
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+                         env=dict(os.environ, RR_TITLE=title, RR_BODY=body), creationflags=0x08000000,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def flash_window(win):
+    """Flash the taskbar button until the window is brought to the front."""
+    try:
+        import ctypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p), ("dwFlags", ctypes.c_uint),
+                        ("uCount", ctypes.c_uint), ("dwTimeout", ctypes.c_uint)]
+        u = ctypes.windll.user32
+        hwnd = u.GetParent(win.winfo_id()) or win.winfo_id()
+        u.FlashWindowEx(ctypes.byref(FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0xE, 0, 0)))   # tray, until foreground
+    except Exception:
+        pass
+
+
+def blip(freq=1200, ms=60):
+    try:
+        import winsound
+        winsound.Beep(freq, ms)
+    except Exception:
+        pass
+
+
+MODS = {"alt": 1, "ctrl": 2, "control": 2, "shift": 4, "win": 8}
+
+
+def parse_hotkey(spec):
+    """'Ctrl+Alt+H' -> (modifier mask, virtual-key code), or None if it isn't usable."""
+    parts = [p.strip().lower() for p in (spec or "").split("+") if p.strip()]
+    if not parts:
+        return None
+    mods = 0
+    for p in parts[:-1]:
+        if p not in MODS:
+            return None
+        mods |= MODS[p]
+    k, fkey = parts[-1], False
+    if len(k) == 1 and k.isalnum():
+        vk = ord(k.upper())
+    elif k[0] == "f" and k[1:].isdigit() and 1 <= int(k[1:]) <= 24:
+        vk, fkey = 0x6F + int(k[1:]), True
+    else:
+        vk = {"space": 0x20, "home": 0x24, "end": 0x23, "insert": 0x2D, "delete": 0x2E,
+              "pageup": 0x21, "pagedown": 0x22}.get(k)
+    if vk is None or not (mods or fkey):
+        return None
+    return mods, vk
+
+
+class Hotkeys:
+    """System-wide hotkeys on a background thread. Presses arrive on `.q` as action names."""
+    def __init__(self, specs):
+        import queue, threading
+        self.q, self.ok, self.failed, self._tid = queue.Queue(), set(), set(), None
+        self._ready = threading.Event()
+        self.t = threading.Thread(target=self._run, args=(dict(specs),), daemon=True)
+        self.t.start()
+        self._ready.wait(2)
+
+    def _run(self, specs):
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        msg = wintypes.MSG()
+        u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)      # make sure this thread has a message queue
+        ids = {}
+        for i, (act, spec) in enumerate(specs.items(), 1):
+            p = parse_hotkey(spec)
+            if p is None:
+                continue
+            if u.RegisterHotKey(None, i, p[0] | 0x4000, p[1]):   # 0x4000 = no auto-repeat
+                ids[i] = act; self.ok.add(act)
+            else:
+                self.failed.add(act)
+        self._ready.set()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x312 and msg.wParam in ids:
+                self.q.put(ids[msg.wParam])
+        for i in ids:
+            u.UnregisterHotKey(None, i)
+
+    def stop(self):
+        try:
+            import ctypes
+            if self._tid:
+                ctypes.windll.user32.PostThreadMessageW(self._tid, 0x12, 0, 0)    # WM_QUIT
+            self.t.join(1.0)
+        except Exception:
+            pass
+
+
+def autostart_get():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, "RobRunTimer")
+        return True
+    except Exception:
+        return False
+
+
+def autostart_set(on):
+    import winreg
+    if getattr(sys, "frozen", False):
+        cmd = f'"{sys.executable}"'
+    else:
+        cmd = f'"{sys.executable.replace("python.exe", "pythonw.exe")}" "{os.path.abspath(__file__)}"'
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            winreg.SetValueEx(k, "RobRunTimer", 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(k, "RobRunTimer")
+            except FileNotFoundError:
+                pass
+
+
+def _ver(s):
+    return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
+
+
+def check_update(q):
+    """Ask GitHub for the latest release; queue (version, url) if it is newer. Silent on any failure."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                     headers={"User-Agent": "RobRunTimer", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            d = json.load(r)
+        tag = d.get("tag_name", "")
+        if _ver(tag) > _ver(VERSION):
+            q.put((tag.lstrip("vV"), d.get("html_url", "")))
+    except Exception:
+        pass
+
+
+def suggest_pcts(s):
+    """For upgrades not yet verified in game, estimate their % from logged cycles in which they are the
+    only unverified upgrade: {upgrade: (percent, number of cycles)}."""
+    cfg, ver, out = s["settings"], set(s["settings"].get("verified", [])), {}
+    for u in UP_KEYS:
+        if u in ver:
+            continue
+        vals = []
+        for c in s["cycles"]:
+            ups = c.get("ups", [])
+            if u in ups and c.get("minutes") and all(k in ver or k == u for k in ups):
+                vals.append((1 - c["minutes"] / s["base"]) * 100 - sum(cfg["pct"][k] for k in ups if k != u))
+        if vals:
+            out[u] = (sum(vals) / len(vals), len(vals))
+    return out
+
+
+def apply_region(win, radius):
+    """Round the corners of a borderless window by clipping it. Returns True if it handled the window."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        if not win.overrideredirect():
+            return False
+        u, g = ctypes.windll.user32, ctypes.windll.gdi32
+        hwnd = u.GetParent(win.winfo_id()) or win.winfo_id()
+        if radius:
+            r = wintypes.RECT()
+            u.GetWindowRect(hwnd, ctypes.byref(r))
+            rgn = g.CreateRoundRectRgn(0, 0, r.right - r.left + 1, r.bottom - r.top + 1, radius * 2, radius * 2)
+            u.SetWindowRgn(hwnd, rgn, True)       # the system owns the region from here
+        else:
+            u.SetWindowRgn(hwnd, None, True)
+        return True
+    except Exception:
+        return False
+
+
+def set_clickthrough(win, on):
+    """Let mouse clicks pass straight through the window to whatever is underneath."""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        hwnd = u.GetParent(win.winfo_id()) or win.winfo_id()
+        ex = u.GetWindowLongW(hwnd, -20)
+        u.SetWindowLongW(hwnd, -20, (ex | 0x80020) if on else (ex & ~0x20))
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- GUI
 def single_instance():
     """Return False if another copy of the app is already running (Windows named mutex)."""
@@ -359,6 +581,8 @@ def paint(w, th, bg=None):
             if role != "chip":
                 w.config(bg=bg, fg=th["fg"], selectcolor=th["entry"], activebackground=bg, activeforeground=th["fg"])
                 _restyle_font(w, th["ui_font"])
+        elif cls == "Scale":
+            w.config(bg=bg, fg=th["fg"], troughcolor=th["entry"], highlightthickness=0, activebackground=th["accent"])
         elif cls == "Canvas" and role == "display":
             w.config(bg=th["screen"])
     except Exception:
@@ -804,6 +1028,51 @@ def gui():
         pass
     cur = {"name": load()["settings"]["skin"]}
     cur["th"] = THEMES[cur["name"]]
+    hk, ct, op, warned = {"obj": None}, {"v": False}, {"v": 100}, {}
+    S0 = load()["settings"]
+    if S0.get("pos"):
+        try:
+            x, y = S0["pos"]
+            root.geometry("+%d+%d" % (max(0, min(x, root.winfo_screenwidth() - 120)),
+                                      max(0, min(y, root.winfo_screenheight() - 80))))
+        except Exception:
+            pass
+
+    rr = {"id": None}
+
+    def reround(*_):
+        """Clip the borderless window to rounded corners (only for skins that ask for them)."""
+        if rr["id"]:
+            root.after_cancel(rr["id"])
+
+        def go():
+            rr["id"] = None
+            apply_region(root, 12 if cur["th"]["round"] else 0)
+        rr["id"] = root.after(120, go)
+    root.bind("<Configure>", lambda e: reround() if e.widget is root else None)
+
+    def save_pos():
+        try:
+            if root.state() == "normal":
+                st = load(); st["settings"]["pos"] = [root.winfo_x(), root.winfo_y()]; save(st)
+        except Exception:
+            pass
+
+    def quit_app():
+        try:
+            if root.state() == "normal":
+                saved[view["mini"]] = (root.winfo_width(), root.winfo_height())
+            st = load()
+            if root.state() == "normal":
+                st["settings"]["pos"] = [root.winfo_x(), root.winfo_y()]
+            st["settings"]["size"] = {str(k): list(v) for k, v in saved.items()}
+            save(st)
+        except Exception:
+            pass
+        if hk["obj"]:
+            hk["obj"].stop()
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", quit_app)
 
     def tag(widget, role):
         widget._role = role
@@ -822,6 +1091,7 @@ def gui():
         def move(e): root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
         for wdg in (bar, ttl):
             wdg.bind("<ButtonPress-1>", press); wdg.bind("<B1-Motion>", move)
+            wdg.bind("<ButtonRelease-1>", lambda e: save_pos())
 
         away = {"v": False}      # True from the moment we iconify until the window is restored
 
@@ -842,7 +1112,7 @@ def gui():
             if e.widget is root and away["v"] and not root.overrideredirect():
                 away["v"] = False       # genuinely restored from the taskbar: go borderless again
                 dbg("restored; re-applying borderless")
-                root.after(50, lambda: (root.overrideredirect(True), taskbar()))
+                root.after(50, lambda: (root.overrideredirect(True), taskbar(), reround()))
         root.bind("<Map>", on_map)
 
         def small_btn(text, cmd, hover):
@@ -851,7 +1121,7 @@ def gui():
             b.bind("<Button-1>", lambda e: (dbg("click on %r" % text), cmd()))
             b.bind("<Enter>", lambda e: b.config(bg=hover or cur["th"]["bar_hover"]))
             b.bind("<Leave>", lambda e: b.config(bg=cur["th"]["bar"]))
-        small_btn("✕", root.destroy, "#c42b1c")
+        small_btn("✕", quit_app, "#c42b1c")
         small_btn("–", minimize, None)
         small_btn("▭", lambda: toggle_mini(), None)
 
@@ -877,6 +1147,7 @@ def gui():
         cur["name"], cur["th"] = name, THEMES[name]
         paint(root, cur["th"])
         set_corners(root, cur["th"]["round"])
+        reround()
         w = settings_win["w"]
         if w is not None and w.winfo_exists():
             paint(w, cur["th"])
@@ -911,11 +1182,12 @@ def gui():
             st = load(); tt = find(st, tid)
             if tt is not None:
                 do_start(st, tt, a)
-            ago.set("0"); alerted[tid] = False
+            ago.set("0"); alerted[tid] = False; warned[tid] = False
 
         def ready():
             st = load(); tt = find(st, tid)
-            if tt is not None: do_ready(st, tt)
+            if tt is not None and do_ready(st, tt):
+                root.after(150, offer_calibration)
 
         def reset():
             def f(st, tt): tt["start"] = None; tt["open"] = None
@@ -925,6 +1197,18 @@ def gui():
             "accent").pack(fill="x", pady=2)
         Btn(inner, text="Actually ready now (log)", command=ready).pack(fill="x")
         Btn(inner, text="Reset", command=reset).pack(fill="x", pady=2)
+        srow = tk.Frame(inner); srow.pack(fill="x", pady=(4, 0))
+        slbl = tag(tk.Label(srow, text="", font=("Segoe UI", 8), anchor="w"), "muted")
+        slbl.pack(side="left")
+
+        def pick_sound():
+            from tkinter import filedialog
+            f = filedialog.askopenfilename(parent=root, title="Sound for this timer",
+                                           filetypes=[("Audio (wav, mp3, wma)", "*.wav *.mp3 *.wma"), ("All files", "*.*")])
+            if f:
+                upd(lambda st, tt: tt.__setitem__("sound", f)); play_alert(f)
+        Btn(srow, text="x", command=lambda: upd(lambda st, tt: tt.__setitem__("sound", ""))).pack(side="right")
+        Btn(srow, text="Sound...", command=pick_sound).pack(side="right", padx=2)
         vs, cbs = {}, {}
         for u in UP_KEYS:
             vs[u] = tk.BooleanVar(value=u in t["ups"])
@@ -938,7 +1222,7 @@ def gui():
             if len(st["timers"]) > 1:
                 st["timers"] = [x for x in st["timers"] if x["id"] != tid]; save(st)
         tag(Btn(inner, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
-        panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs}
+        panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs, "slbl": slbl}
         paint(box, cur["th"])
 
     def add_timer():
@@ -976,12 +1260,15 @@ def gui():
         w.attributes("-topmost", True)
         settings_win["w"] = w
         S = st0["settings"]
+        cols = tk.Frame(w); cols.pack(fill="both")
+        left = tk.Frame(cols); left.pack(side="left", fill="both", anchor="n")
+        right = tk.Frame(cols); right.pack(side="left", fill="both", anchor="n")
 
         def commit(fn):
             st = load(); fn(st); save(st)
 
         # --- skin
-        kf = tk.LabelFrame(w, text="Skin", padx=8, pady=6); kf.pack(fill="x", padx=10, pady=(10, 4))
+        kf = tk.LabelFrame(left, text="Skin", padx=8, pady=6); kf.pack(fill="x", padx=10, pady=(10, 4))
         skin = tk.StringVar(value=S["skin"])
 
         def pick_skin():
@@ -994,7 +1281,7 @@ def gui():
             chip.grid(row=i // 3, column=i % 3, padx=3, pady=3)
 
         # --- time settings
-        tf = tk.LabelFrame(w, text="Time", padx=8, pady=4); tf.pack(fill="x", padx=10, pady=4)
+        tf = tk.LabelFrame(left, text="Time", padx=8, pady=4); tf.pack(fill="x", padx=10, pady=4)
         clk = tk.IntVar(value=S["clock"])
         tk.Label(tf, text="Clock format:").pack(anchor="w")
         for v, t in ((12, "12-hour (3:45:10 PM)"), (24, "24-hour (15:45:10)")):
@@ -1005,7 +1292,7 @@ def gui():
                        command=lambda: commit(lambda st: st["settings"].__setitem__("seconds", sec.get()))).pack(anchor="w")
 
         # --- grow time + upgrade percentages
-        gf = tk.LabelFrame(w, text="Grow time", padx=8, pady=4); gf.pack(fill="x", padx=10, pady=4)
+        gf = tk.LabelFrame(left, text="Grow time", padx=8, pady=4); gf.pack(fill="x", padx=10, pady=4)
         row = tk.Frame(gf); row.pack(anchor="w")
         tk.Label(row, text="Base time, no upgrades (min):").pack(side="left")
         base = tk.StringVar(value=f"{st0['base']:g}")
@@ -1030,7 +1317,7 @@ def gui():
             pvars[u].trace_add("write", pchanged)
 
         # --- defaults for new timers
-        df = tk.LabelFrame(w, text="Defaults for new timers", padx=8, pady=4); df.pack(fill="x", padx=10, pady=4)
+        df = tk.LabelFrame(left, text="Defaults for new timers", padx=8, pady=4); df.pack(fill="x", padx=10, pady=4)
         dvars = {}
         for u in UP_KEYS:
             dvars[u] = tk.BooleanVar(value=u in S["default_ups"])
@@ -1039,7 +1326,7 @@ def gui():
                                "default_ups", [k for k in UP_KEYS if dvars[k].get()]))).pack(anchor="w")
 
         # --- window / alerts
-        af = tk.LabelFrame(w, text="Window and alerts", padx=8, pady=4); af.pack(fill="x", padx=10, pady=4)
+        af = tk.LabelFrame(right, text="Sound and window", padx=8, pady=4); af.pack(fill="x", padx=10, pady=4)
         beep = tk.BooleanVar(value=S["beep"]); top = tk.BooleanVar(value=S["topmost"])
         tk.Checkbutton(af, text="Play a sound when a timer is ready", variable=beep,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("beep", beep.get()))).pack(anchor="w")
@@ -1067,6 +1354,69 @@ def gui():
         tk.Checkbutton(af, text="Slim title bar with small buttons (restart to apply)", variable=cb_var,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("compact_bar", cb_var.get()))).pack(anchor="w")
 
+        # --- alerts
+        nf = tk.LabelFrame(right, text="Alerts", padx=8, pady=4); nf.pack(fill="x", padx=10, pady=4)
+        tvar, fvar, wvar = tk.BooleanVar(value=S["toast"]), tk.BooleanVar(value=S["flash"]), tk.StringVar(value=f"{S['warn_min']:g}")
+        tk.Checkbutton(nf, text="Windows notification when ready", variable=tvar,
+                       command=lambda: commit(lambda st: st["settings"].__setitem__("toast", tvar.get()))).pack(anchor="w")
+        tk.Checkbutton(nf, text="Flash the taskbar button when ready", variable=fvar,
+                       command=lambda: commit(lambda st: st["settings"].__setitem__("flash", fvar.get()))).pack(anchor="w")
+        wr = tk.Frame(nf); wr.pack(anchor="w")
+        tk.Label(wr, text="Warn this many minutes early (0 = off):").pack(side="left")
+        REntry(wr, textvariable=wvar, width=4).pack(side="left", padx=4)
+
+        def warn_changed(*_):
+            try: v = float(wvar.get())
+            except ValueError: return
+            if v >= 0: commit(lambda st: st["settings"].__setitem__("warn_min", v))
+        wvar.trace_add("write", warn_changed)
+
+        # --- hotkeys
+        hf = tk.LabelFrame(right, text="Global hotkeys (work while you are in the game)", padx=8, pady=4)
+        hf.pack(fill="x", padx=10, pady=4)
+        hnames = {"next": "Start next ready timer", "all": "Start all ready timers",
+                  "mini": "Toggle clock-only view", "through": "Toggle click-through"}
+        hvars = {}
+        for k, label in hnames.items():
+            r = tk.Frame(hf); r.pack(anchor="w")
+            tk.Label(r, text=label, width=22, anchor="w").pack(side="left")
+            hvars[k] = tk.StringVar(value=S["hotkeys"].get(k, ""))
+            REntry(r, textvariable=hvars[k], width=14).pack(side="left", padx=4)
+
+        def hk_changed(*_):
+            commit(lambda st: st["settings"]["hotkeys"].update({k: v.get().strip() for k, v in hvars.items()}))
+        for v in hvars.values():
+            v.trace_add("write", hk_changed)
+        hmsg = tag(tk.Label(hf, text="e.g. Ctrl+Alt+H, F9, Ctrl+Shift+F8. Press Apply after editing.", font=("Segoe UI", 7),
+                            anchor="w", justify="left"), "muted")
+
+        def apply_hk():
+            h = start_hotkeys()
+            bad = [hnames[k] for k in hvars if hvars[k].get().strip() and k not in h.ok]
+            hmsg.config(text=("Could not register: " + ", ".join(bad) + " (invalid or used by another app)") if bad
+                        else "Hotkeys active.")
+        Btn(hf, text="Apply", command=apply_hk).pack(anchor="w", pady=(2, 0))
+        hmsg.pack(anchor="w")
+
+        # --- window extras
+        xf = tk.LabelFrame(right, text="Window", padx=8, pady=4); xf.pack(fill="x", padx=10, pady=4)
+        tk.Label(xf, text="Opacity (%):").pack(anchor="w")
+        osc = tk.Scale(xf, from_=30, to=100, orient="horizontal", length=200,
+                       command=lambda v: root.attributes("-alpha", int(float(v)) / 100))
+        osc.set(S["opacity"]); osc.pack(anchor="w")
+        osc.bind("<ButtonRelease-1>", lambda e: commit(lambda st: st["settings"].__setitem__("opacity", int(osc.get()))))
+        cvar, avar, uvar = tk.BooleanVar(value=S["clickthrough"]), tk.BooleanVar(value=autostart_get()), tk.BooleanVar(value=S["check_updates"])
+        tk.Checkbutton(xf, text="Clock-only view ignores the mouse\n(use the click-through hotkey to turn it off)",
+                       variable=cvar, justify="left",
+                       command=lambda: commit(lambda st: st["settings"].__setitem__("clickthrough", cvar.get()))).pack(anchor="w")
+
+        def set_auto():
+            try: autostart_set(avar.get())
+            except Exception: avar.set(autostart_get())
+        tk.Checkbutton(xf, text="Start with Windows", variable=avar, command=set_auto).pack(anchor="w")
+        tk.Checkbutton(xf, text="Check for updates at start-up", variable=uvar,
+                       command=lambda: commit(lambda st: st["settings"].__setitem__("check_updates", uvar.get()))).pack(anchor="w")
+
         def restore():
             def f(st):
                 st["base"] = DEF_BASE
@@ -1077,19 +1427,124 @@ def gui():
             w.destroy(); open_settings()
         bf = tk.Frame(w); bf.pack(fill="x", padx=10, pady=(4, 2))
         Btn(bf, text="Restore defaults", command=restore).pack(side="left")
+        Btn(bf, text="History / calibrate...", command=open_history).pack(side="left", padx=6)
         Btn(bf, text="Close", command=w.destroy).pack(side="right")
         tag(tk.Label(w, text=f"Rob Run Harvest Timer v{VERSION}  -  unofficial fan tool, not affiliated with the "
                              "ROB RUN developer", font=("Segoe UI", 7)), "muted").pack(pady=(0, 8))
         paint(w, cur["th"])
 
+    # ---------------------------------------------------------------- history + calibration
+    hist = {"w": None}
+
+    def set_pct(u, v):
+        def f(st): st["settings"]["pct"][u] = round(v, 1)
+        st = load(); f(st); save(st)
+
+    def mark_verified(u):
+        st = load(); vs = set(st["settings"].get("verified", [])); vs.add(u)
+        st["settings"]["verified"] = sorted(vs); save(st)
+
+    def open_history():
+        if hist["w"] is not None and hist["w"].winfo_exists():
+            hist["w"].lift(); return
+        w = tk.Toplevel(root); w.title("History and calibration"); w.attributes("-topmost", True)
+        hist["w"] = w
+        body = tk.Frame(w); body.pack(fill="both", padx=12, pady=10)
+
+        def render():
+            for c in body.winfo_children():
+                c.destroy()
+            st = load(); cfg = st["settings"]
+            tag(tk.Label(body, text="Calibration", font=("Segoe UI", 10, "bold")), "muted").pack(anchor="w")
+            sug = suggest_pcts(st)
+            if not sug:
+                tk.Label(body, justify="left", text="Press \"Actually ready now (log)\" the moment a bush is really ready.\n"
+                         "The app then compares the real time with the formula and can correct the\n"
+                         "percentage of any upgrade that is not yet marked as verified.").pack(anchor="w", pady=(0, 6))
+            for u, (pct, n) in sug.items():
+                r = tk.Frame(body); r.pack(anchor="w", fill="x", pady=2)
+                tk.Label(r, text=f"{UP_NAMES[u]}: logged cycles imply {pct:.1f}% (set to {cfg['pct'][u]:g}%), {n} cycle(s)").pack(side="left")
+                Btn(r, text="Mark verified", command=lambda u=u: (mark_verified(u), render())).pack(side="right")
+                Btn(r, text=f"Use {pct:.1f}%", command=lambda u=u, pct=pct: (set_pct(u, pct), render())).pack(side="right", padx=3)
+            unv = [UP_NAMES[u] for u in UP_KEYS if u not in cfg.get("verified", [])]
+            if unv:
+                tag(tk.Label(body, text="Not yet verified in game: " + ", ".join(unv), font=("Segoe UI", 8)), "muted").pack(anchor="w")
+            tag(tk.Label(body, text="Logged cycles (latest first)", font=("Segoe UI", 10, "bold")), "muted").pack(anchor="w", pady=(8, 2))
+            g = tk.Frame(body); g.pack(anchor="w")
+            for c, h in enumerate(("Timer", "Upgrades", "Formula", "Actual", "Off by")):
+                tag(tk.Label(g, text=h, font=("Segoe UI", 8, "bold")), "muted").grid(row=0, column=c, padx=6, sticky="w")
+            rows = list(reversed(st["cycles"]))[:12]
+            for i, cy in enumerate(rows, 1):
+                exp = st["base"] * (1 - sum(cfg["pct"].get(k, 0) for k in cy.get("ups", [])) / 100)
+                act = cy.get("minutes", 0)
+                vals = (cy.get("timer", cy.get("table", "-")), "+".join(UP_NAMES[k] for k in cy.get("ups", []) if k in UP_NAMES) or "none",
+                        f"{exp:.1f} min", f"{act:.1f} min", f"{act - exp:+.1f} min")
+                for c, v in enumerate(vals):
+                    tk.Label(g, text=v).grid(row=i, column=c, padx=6, sticky="w")
+            if not rows:
+                tk.Label(g, text="Nothing logged yet.").grid(row=1, column=0, columnspan=5, sticky="w", padx=6)
+            paint(body, cur["th"])
+        render()
+        Btn(w, text="Close", command=w.destroy).pack(pady=(0, 10))
+        paint(w, cur["th"]); set_corners(w, cur["th"]["round"])
+
+    def offer_calibration():
+        from tkinter import messagebox
+        st = load()
+        for u, (pct, n) in suggest_pcts(st).items():
+            if abs(pct - st["settings"]["pct"][u]) >= 0.5:
+                if messagebox.askyesno("Calibrate", f"Your logged cycles suggest {UP_NAMES[u]} cuts {pct:.1f}% "
+                                       f"(currently {st['settings']['pct'][u]:g}%), from {n} cycle(s).\n\nUpdate it?", parent=root):
+                    set_pct(u, pct)
+                break
+
+    # ---------------------------------------------------------------- harvest actions (buttons + hotkeys)
+    def is_ready(st, t):
+        return t["start"] is None or time.time() >= t["start"] + minutes(st, t) * 60
+
+    def harvest(which):
+        st = load()
+        due = [t for t in st["timers"] if is_ready(st, t)]
+        if which == "next":       # a finished timer first, otherwise one that is idle
+            due = ([t for t in due if t["start"]] or due)[:1]
+        for t in due:
+            do_start(st, t); alerted[t["id"]] = False; warned[t["id"]] = False
+        blip(1300 if due else 400, 80)
+        refresh()
+
+    def toggle_through():
+        st = load(); st["settings"]["clickthrough"] = not st["settings"].get("clickthrough", False); save(st)
+        refresh()
+
+    def start_hotkeys():
+        if hk["obj"]:
+            hk["obj"].stop()
+        hk["obj"] = Hotkeys(load()["settings"].get("hotkeys", {}))
+        return hk["obj"]
+
+    def poll():
+        try:
+            while True:
+                act = hk["obj"].q.get_nowait()
+                {"next": lambda: harvest("next"), "all": lambda: harvest("all"),
+                 "mini": toggle_mini, "through": toggle_through}[act]()
+        except Exception:
+            pass
+        root.after(100, poll)
+
     bottom = tk.Frame(root); bottom.pack(side="bottom", fill="x", pady=(0, 6))
     Btn(bottom, text="+ Add timer", command=add_timer).pack(side="left", padx=8)
+    Btn(bottom, text="Harvest all", command=lambda: harvest("all")).pack(side="left")
+    upd_lbl = tag(tk.Label(bottom, text="", cursor="hand2", font=("Segoe UI", 8, "underline")), "link")
     Btn(bottom, text="Settings", command=open_settings).pack(side="right", padx=(0, 22))
     Btn(bottom, text="Clock only", command=lambda: toggle_mini()).pack(side="right", padx=6)
 
     # ---------------------------------------------------------------- clock-only view + window resizing
     minibox = tk.Frame(root)
     minis, view, saved = {}, {"mini": None}, {}
+    for k, v in (S0.get("size") or {}).items():
+        try: saved[k == "True"] = (max(200, int(v[0])), max(80, int(v[1])))
+        except Exception: pass
     mdrag = {}
 
     def mpress(e): mdrag["x"], mdrag["y"] = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
@@ -1158,6 +1613,12 @@ def gui():
             set_skin(cfg["skin"]); th = cur["th"]
         if topmost["v"] != cfg["topmost"]:
             topmost["v"] = cfg["topmost"]; root.attributes("-topmost", cfg["topmost"])
+        al = max(30, min(100, int(cfg.get("opacity", 100))))
+        if op["v"] != al:
+            op["v"] = al; root.attributes("-alpha", al / 100)
+        want = bool(cfg.get("clickthrough") and cfg.get("mini") and hk["obj"] and "through" in hk["obj"].ok)
+        if ct["v"] != want:
+            ct["v"] = want; set_clickthrough(root, want)
         ids = [t["id"] for t in st["timers"]]
         changed = False
         for tid in list(panels):          # drop removed
@@ -1180,6 +1641,7 @@ def gui():
             for u in UP_KEYS:
                 p["cbs"][u].config(text=f"{UP_NAMES[u]} -{cfg['pct'][u]:g}%")
             mins = minutes(st, t)
+            p["slbl"].config(text="Sound: " + (os.path.basename(t["sound"]) if t.get("sound") else "default"))
             disp = ensure_mini(t, many) if mini else p["disp"]
             if t["start"]:
                 end = t["start"] + mins * 60
@@ -1187,14 +1649,29 @@ def gui():
                 if left > 0:
                     disp.show(th, fmt(left), "run", 1 - left / (mins * 60))
                     p["info"].config(text=f"{mins:.1f} min - ready {clock(st, end)}")
+                    alerted[t["id"]] = False
+                    wm = cfg.get("warn_min", 2)
+                    if wm and mins > wm:
+                        if left > wm * 60:
+                            warned[t["id"]] = False
+                        elif not warned.get(t["id"]):
+                            warned[t["id"]] = True
+                            if cfg["beep"]:
+                                blip(900, 90); blip(1100, 90)
+                            if cfg.get("toast", True):
+                                toast("Rob Run: almost ready", f"{t['name']} is ready in about {int(left // 60) + 1} min.")
                 else:
                     disp.show(th, "READY!", "ready", 1.0, flash)
                     p["info"].config(text=f"since {clock(st, end)}")
                     if not alerted.get(t["id"]):
                         alerted[t["id"]] = True
                         if cfg["beep"]:
-                            play_alert(cfg["sound_path"])
+                            play_alert(t.get("sound") or cfg["sound_path"])
+                        if cfg.get("toast", True):
+                            toast("Rob Run: READY!", f"{t['name']} has regrown - time to harvest.")
                         root.deiconify(); root.lift()
+                        if cfg.get("flash", True):
+                            flash_window(root)
             else:
                 last = [c for c in st["cycles"] if c.get("timer") == t["name"]]
                 disp.show(th, "--:--", "idle", 0.0)
@@ -1208,6 +1685,23 @@ def gui():
     set_skin(cur["name"])
     if not load()["settings"]["welcomed"]:
         root.after(500, welcome)
+    start_hotkeys()
+    poll()
+    if load()["settings"].get("check_updates", True):
+        import threading, webbrowser
+        uq = queue.Queue()
+        threading.Thread(target=check_update, args=(uq,), daemon=True).start()
+
+        def show_update():
+            try:
+                ver, url = uq.get_nowait()
+            except queue.Empty:
+                root.after(2000, show_update); return
+            upd_lbl.config(text=f"Update v{ver} available")
+            upd_lbl.bind("<Button-1>", lambda e: webbrowser.open(url or f"https://github.com/{REPO}/releases"))
+            upd_lbl.pack(side="left", padx=8)
+            paint(upd_lbl, cur["th"])
+        root.after(3000, show_update)
     tick()
     root.mainloop()
 

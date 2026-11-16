@@ -40,3 +40,12 @@ Produces `dist\RobRunTimer.exe` (single file, ~10 MB, no Python needed). The ico
 `tools\make_icon.py` (needs Pillow) and committed as `assets\icon.ico`.
 
 Unsigned builds may show a Windows SmartScreen warning ("More info" > "Run anyway").
+
+## New in 1.1
+
+- **Alerts**: Windows notification and taskbar flash when a timer is ready, an early warning (default 2 min before), and an optional sound per timer.
+- **Global hotkeys** (work while the game has focus; editable in Settings): `Ctrl+Alt+H` start next ready timer, `Ctrl+Alt+A` start all ready timers, `Ctrl+Alt+M` clock-only view, `Ctrl+Alt+C` click-through.
+- **Harvest all** button, **opacity** slider, click-through clock-only view, and **Start with Windows**.
+- Window position and size are remembered; the Modern skin now has truly rounded window corners.
+- **History / calibrate** (Settings): compares logged cycles with the formula and can correct an unverified upgrade's percentage (UV Lamp).
+- Checks GitHub for a newer release at start-up (can be turned off).
