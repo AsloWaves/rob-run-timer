@@ -24,6 +24,7 @@ DEF_SETTINGS = {
     "seconds": True,                   # show seconds in clock times
     "beep": True,                      # beep when a timer is ready
     "topmost": True,                   # keep window above the game
+    "compact_bar": True,               # slim custom title bar with small buttons (restart to apply)
     "default_ups": ["fan", "pump"],    # upgrades pre-ticked on newly added timers
     "pct": {"fan": 12, "pump": 14, "uv": 24},   # time cut per upgrade, in percent
 }
@@ -161,6 +162,51 @@ def gui():
     root = tk.Tk()
     root.title("Rob Run Harvest Timer")
     root.attributes("-topmost", True)
+
+    if load()["settings"].get("compact_bar", True):
+        # Windows draws the native title-bar buttons at a fixed size, so replace the bar with a slim one.
+        BG = "#2b2b2b"
+        root.overrideredirect(True)
+        bar = tk.Frame(root, bg=BG, height=18)
+        bar.pack(side="top", fill="x")
+        ttl = tk.Label(bar, text="Rob Run Timer", bg=BG, fg="#ccc", font=("Segoe UI", 8))
+        ttl.pack(side="left", padx=6)
+        drag = {}
+
+        def press(e): drag["x"], drag["y"] = e.x_root - root.winfo_x(), e.y_root - root.winfo_y()
+        def move(e): root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
+        for wdg in (bar, ttl):
+            wdg.bind("<ButtonPress-1>", press); wdg.bind("<B1-Motion>", move)
+
+        def minimize():
+            root.overrideredirect(False); root.iconify()
+        restoring = {"v": False}
+
+        def on_map(e):
+            if e.widget is root and not restoring["v"] and not root.overrideredirect():
+                restoring["v"] = True
+                root.after(50, lambda: (root.overrideredirect(True), restoring.update(v=False), taskbar()))
+        root.bind("<Map>", on_map)
+
+        def small_btn(text, cmd, hover):
+            b = tk.Label(bar, text=text, bg=BG, fg="#ddd", font=("Segoe UI", 8), width=3)
+            b.pack(side="right", fill="y")
+            b.bind("<Button-1>", lambda e: cmd())
+            b.bind("<Enter>", lambda e: b.config(bg=hover)); b.bind("<Leave>", lambda e: b.config(bg=BG))
+        small_btn("✕", root.destroy, "#c42b1c")
+        small_btn("–", minimize, "#444")
+
+        def taskbar():   # keep a taskbar button even though the window is borderless
+            try:
+                import ctypes
+                u = ctypes.windll.user32
+                hwnd = u.GetParent(root.winfo_id())
+                u.SetWindowLongW(hwnd, -20, (u.GetWindowLongW(hwnd, -20) & ~0x80) | 0x40000)
+                root.withdraw(); root.after(10, root.deiconify)
+            except Exception:
+                pass
+        root.after(100, taskbar)
+
     panels = {}   # timer id -> dict of widgets
     alerted = {}
     topmost = {"v": True}
@@ -294,6 +340,10 @@ def gui():
                        command=lambda: commit(lambda st: st["settings"].__setitem__("beep", beep.get()))).pack(anchor="w")
         tk.Checkbutton(af, text="Keep window on top of other windows", variable=top,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("topmost", top.get()))).pack(anchor="w")
+
+        cb_var = tk.BooleanVar(value=S.get("compact_bar", True))
+        tk.Checkbutton(af, text="Slim title bar with small buttons (restart to apply)", variable=cb_var,
+                       command=lambda: commit(lambda st: st["settings"].__setitem__("compact_bar", cb_var.get()))).pack(anchor="w")
 
         def restore():
             def f(st):
