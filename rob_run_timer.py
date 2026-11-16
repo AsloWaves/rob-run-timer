@@ -1,31 +1,63 @@
-"""Rob Run harvest timer - any number of tables, each with its own upgrades
-(native tkinter app + CLI sharing one state file).
+"""Rob Run Harvest Timer - any number of grow tables, each with its own upgrades.
+Native tkinter app + CLI sharing one state file. Unofficial fan tool.
 
-Verified 2026-11-16: upgrades CUT grow time additively: time = base * (1 - sum of upgrade %).
+Measured: upgrades CUT grow time additively: time = base * (1 - sum of upgrade %).
 Base (no upgrades) = 60 min. Fan 12%, Water Pump 14%, UV Lamp 24% (all editable in Settings).
 
-GUI:   pythonw rob_run_timer.py
+GUI:   pythonw rob_run_timer.py          (or the packaged RobRunTimer.exe)
 CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer number (default 1)
        python rob_run_timer.py ready [--timer N] [--ago MIN]   log actual ready moment
-       python rob_run_timer.py set [--base 60] [--clock 12|24] [--timer N --ups fan,pump --name TEXT]
+       python rob_run_timer.py set [--base 60] [--clock 12|24] [--skin NAME] [--timer N --ups fan,pump --name TEXT]
        python rob_run_timer.py add [--name TEXT] [--ups fan,pump]
        python rob_run_timer.py remove --timer N
        python rob_run_timer.py status
 """
-import argparse, json, os, sys, time
+import argparse, json, os, shutil, sys, time
 from datetime import datetime
 
+VERSION = "1.0.0"
 DIR = os.path.dirname(os.path.abspath(__file__))
-STATE = os.path.join(DIR, "state.json")
+# Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
+# ROBRUN_STATE can point somewhere else (testing).
+_APPDATA = os.environ.get("APPDATA")
+DATA_DIR = os.path.join(_APPDATA, "RobRunTimer") if _APPDATA else DIR
+STATE = os.environ.get("ROBRUN_STATE") or os.path.join(DATA_DIR, "state.json")
+LEGACY_STATE = os.path.join(DIR, "state.json")   # older versions kept it next to the script
+
 UP_KEYS = ("fan", "pump", "uv")
 UP_NAMES = {"fan": "Fan", "pump": "Water Pump", "uv": "UV Lamp"}
+
+# --------------------------------------------------------------------------- skins
+THEMES = {
+    "Classic": dict(bg="#f0f0f0", fg="#000000", muted="#444444", entry="#ffffff", btn="#e1e1e1", btn_fg="#000000",
+                    accent="#3a9d3a", accent_fg="#ffffff", danger="#aa3333", timer="#000000", ready="#1a9a1a",
+                    logged="#0000ff", bar="#2b2b2b", bar_fg="#cccccc", bar_hover="#444444", link="#0066cc", font="Consolas"),
+    "Dark": dict(bg="#1e1e1e", fg="#e6e6e6", muted="#9a9a9a", entry="#2d2d2d", btn="#3a3a3a", btn_fg="#eeeeee",
+                 accent="#2e8b57", accent_fg="#ffffff", danger="#ff6b6b", timer="#f2f2f2", ready="#5cff7a",
+                 logged="#6cb2ff", bar="#111111", bar_fg="#bbbbbb", bar_hover="#333333", link="#6cb2ff", font="Consolas"),
+    "Forest": dict(bg="#14231a", fg="#dff3df", muted="#8fb59a", entry="#1f3427", btn="#2b4a37", btn_fg="#e6f7e6",
+                   accent="#3f9b45", accent_fg="#ffffff", danger="#ff8a80", timer="#b9f6ca", ready="#69ff47",
+                   logged="#80deea", bar="#0b150f", bar_fg="#a5d6a7", bar_hover="#24402f", link="#80deea", font="Consolas"),
+    "Ocean": dict(bg="#0d2137", fg="#e3f2fd", muted="#8fb3d0", entry="#17324d", btn="#1f4568", btn_fg="#e3f2fd",
+                  accent="#1e88e5", accent_fg="#ffffff", danger="#ff8a80", timer="#bbdefb", ready="#69f0ae",
+                  logged="#ffd54f", bar="#07141f", bar_fg="#90caf9", bar_hover="#173653", link="#82b1ff", font="Consolas"),
+    "Synthwave": dict(bg="#1a1033", fg="#f5e9ff", muted="#b39ddb", entry="#2a1850", btn="#3d2370", btn_fg="#ffe6ff",
+                      accent="#e0207f", accent_fg="#ffffff", danger="#ff6e6e", timer="#00e5ff", ready="#ffee58",
+                      logged="#ff80ab", bar="#0e0720", bar_fg="#e1bee7", bar_hover="#3d2370", link="#00e5ff", font="Consolas"),
+    "Paper": dict(bg="#f6f1e7", fg="#2b2b2b", muted="#6d6556", entry="#fffdf7", btn="#e8dfcc", btn_fg="#2b2b2b",
+                  accent="#5f7f1f", accent_fg="#ffffff", danger="#b03a2e", timer="#3b3024", ready="#2e7d32",
+                  logged="#1565c0", bar="#d9cfb8", bar_fg="#3b3024", bar_hover="#c9bd9f", link="#1565c0", font="Georgia"),
+}
+
 DEF_SETTINGS = {
+    "skin": "Dark",                    # one of THEMES
     "clock": 12,                       # 12 or 24 hour clock for ready times
     "seconds": True,                   # show seconds in clock times
     "beep": True,                      # play a sound when a timer is ready
     "sound_path": "",                  # custom finish sound (.wav/.mp3/.wma); empty = built-in beep
     "topmost": True,                   # keep window above the game
     "compact_bar": True,               # slim custom title bar with small buttons (restart to apply)
+    "welcomed": False,                 # first-run welcome already shown
     "default_ups": ["fan", "pump"],    # upgrades pre-ticked on newly added timers
     "pct": {"fan": 12, "pump": 14, "uv": 24},   # time cut per upgrade, in percent
 }
@@ -41,7 +73,24 @@ def default():
             "timers": [new_timer("Table 1", DEF_SETTINGS["default_ups"])], "cycles": []}
 
 
+def _migrate_legacy():
+    """Bring an older next-to-the-script state.json into the data folder, once."""
+    if os.path.exists(STATE) or not os.path.exists(LEGACY_STATE) or os.environ.get("ROBRUN_STATE"):
+        return
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        shutil.copy2(LEGACY_STATE, STATE)
+        with open(STATE, encoding="utf-8-sig") as f:
+            s = json.load(f)
+        s.setdefault("settings", {})["welcomed"] = True   # existing user: skip the welcome
+        with open(STATE, "w", encoding="utf-8") as f:
+            json.dump(s, f, indent=2)
+    except Exception:
+        pass
+
+
 def load():
+    _migrate_legacy()
     try:
         with open(STATE, encoding="utf-8-sig") as f:
             s = json.load(f)
@@ -59,11 +108,14 @@ def load():
     out = {**default(), **s}
     st = {**json.loads(json.dumps(DEF_SETTINGS)), **s.get("settings", {})}
     st["pct"] = {**DEF_SETTINGS["pct"], **st.get("pct", {})}
+    if st["skin"] not in THEMES:
+        st["skin"] = DEF_SETTINGS["skin"]
     out["settings"] = st
     return out
 
 
 def save(s):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
     tmp = STATE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
@@ -134,7 +186,7 @@ def do_ready(s, t, ago=0.0):
 
 
 def status(s):
-    print(f"base={s['base']} clock={s['settings']['clock']}h")
+    print(f"v{VERSION} base={s['base']} clock={s['settings']['clock']}h skin={s['settings']['skin']}")
     for i, t in enumerate(s["timers"], 1):
         line = f"{i}. {t['name']} ups={t['ups']} -> {minutes(s, t):.1f} min"
         if t["start"]:
@@ -160,6 +212,10 @@ def cli(a):
     elif a.cmd == "set":
         if a.base is not None: s["base"] = a.base
         if a.clock: s["settings"]["clock"] = a.clock
+        if a.skin:
+            match = [k for k in THEMES if k.lower() == a.skin.lower()]
+            if not match: sys.exit("skins: " + ", ".join(THEMES))
+            s["settings"]["skin"] = match[0]
         if a.timer:
             if a.ups is not None: s["timers"][idx]["ups"] = [u for u in a.ups.split(",") if u in UP_KEYS]
             if a.name: s["timers"][idx]["name"] = a.name
@@ -175,19 +231,83 @@ def cli(a):
     status(load())
 
 
+# --------------------------------------------------------------------------- GUI
+def single_instance():
+    """Return False if another copy of the app is already running (Windows named mutex)."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        single_instance.handle = k.CreateMutexW(None, False, "Local\\RobRunHarvestTimer")
+        return k.GetLastError() != 183
+    except Exception:
+        return True
+
+
+def paint(w, th):
+    """Recursively apply skin colours. Widgets can carry a `_role` to get special treatment."""
+    cls, role = w.winfo_class(), getattr(w, "_role", None)
+    try:
+        if cls in ("Frame", "Toplevel", "Tk"):
+            w.config(bg=th["bar"] if role == "bar" else th["bg"])
+            if cls in ("Tk", "Toplevel"):
+                w.config(highlightthickness=1, highlightbackground=th["bar"], highlightcolor=th["bar"])
+        elif cls == "Labelframe":
+            w.config(bg=th["bg"], fg=th["fg"])
+        elif cls == "Label":
+            if role == "bar_text":
+                w.config(bg=th["bar"], fg=th["bar_fg"])
+            elif role == "bar_btn":
+                w.config(bg=th["bar"], fg=th["bar_fg"])
+            elif role == "big":
+                w.config(bg=th["bg"], font=(th["font"], 38))
+            elif role == "muted":
+                w.config(bg=th["bg"], fg=th["muted"])
+            elif role == "link":
+                w.config(bg=th["bg"], fg=th["link"])
+            else:
+                w.config(bg=th["bg"], fg=th["fg"])
+        elif cls == "Button":
+            if role == "accent":
+                w.config(bg=th["accent"], fg=th["accent_fg"], activebackground=th["accent"], activeforeground=th["accent_fg"])
+            elif role == "danger":
+                w.config(bg=th["btn"], fg=th["danger"], activebackground=th["btn"], activeforeground=th["danger"])
+            else:
+                w.config(bg=th["btn"], fg=th["btn_fg"], activebackground=th["entry"], activeforeground=th["btn_fg"])
+        elif cls == "Entry":
+            w.config(bg=th["entry"], fg=th["fg"], insertbackground=th["fg"])
+        elif cls in ("Checkbutton", "Radiobutton"):
+            if role != "chip":
+                w.config(bg=th["bg"], fg=th["fg"], selectcolor=th["entry"], activebackground=th["bg"], activeforeground=th["fg"])
+    except Exception:
+        pass
+    for c in w.winfo_children():
+        paint(c, th)
+
+
 def gui():
     import tkinter as tk
+    if not single_instance():
+        sys.exit(0)
     root = tk.Tk()
     root.title("Rob Run Harvest Timer")
     root.attributes("-topmost", True)
+    try:   # window / taskbar icon (bundled inside the packaged .exe, or next to the script)
+        root.iconbitmap(os.path.join(getattr(sys, "_MEIPASS", DIR), "assets", "icon.ico"))
+    except Exception:
+        pass
+    cur = {"name": load()["settings"]["skin"]}
+    cur["th"] = THEMES[cur["name"]]
+
+    def tag(widget, role):
+        widget._role = role
+        return widget
 
     if load()["settings"].get("compact_bar", True):
         # Windows draws the native title-bar buttons at a fixed size, so replace the bar with a slim one.
-        BG = "#2b2b2b"
         root.overrideredirect(True)
-        bar = tk.Frame(root, bg=BG, height=18)
+        bar = tag(tk.Frame(root, height=18), "bar")
         bar.pack(side="top", fill="x")
-        ttl = tk.Label(bar, text="Rob Run Timer", bg=BG, fg="#ccc", font=("Segoe UI", 8))
+        ttl = tag(tk.Label(bar, text=f"Rob Run Timer", font=("Segoe UI", 8)), "bar_text")
         ttl.pack(side="left", padx=6)
         drag = {}
 
@@ -207,12 +327,13 @@ def gui():
         root.bind("<Map>", on_map)
 
         def small_btn(text, cmd, hover):
-            b = tk.Label(bar, text=text, bg=BG, fg="#ddd", font=("Segoe UI", 8), width=3)
+            b = tag(tk.Label(bar, text=text, font=("Segoe UI", 8), width=3), "bar_btn")
             b.pack(side="right", fill="y")
             b.bind("<Button-1>", lambda e: cmd())
-            b.bind("<Enter>", lambda e: b.config(bg=hover)); b.bind("<Leave>", lambda e: b.config(bg=BG))
+            b.bind("<Enter>", lambda e: b.config(bg=hover or cur["th"]["bar_hover"]))
+            b.bind("<Leave>", lambda e: b.config(bg=cur["th"]["bar"]))
         small_btn("✕", root.destroy, "#c42b1c")
-        small_btn("–", minimize, "#444")
+        small_btn("–", minimize, None)
 
         def taskbar():   # keep a taskbar button even though the window is borderless
             try:
@@ -232,6 +353,13 @@ def gui():
     holder = tk.Frame(root)
     holder.pack(side="top", fill="both", expand=True)
 
+    def set_skin(name):
+        cur["name"], cur["th"] = name, THEMES[name]
+        paint(root, cur["th"])
+        w = settings_win["w"]
+        if w is not None and w.winfo_exists():
+            paint(w, cur["th"])
+
     def build_panel(t):
         tid = t["id"]
         box = tk.LabelFrame(holder, padx=6, pady=4)
@@ -245,8 +373,8 @@ def gui():
 
         name.trace_add("write", lambda *_: upd(lambda st, tt: tt.__setitem__("name", name.get())))
         tk.Entry(box, textvariable=name, justify="center", font=("Segoe UI", 10, "bold")).pack(fill="x")
-        big = tk.Label(box, text="--:--", font=("Consolas", 38)); big.pack()
-        info = tk.Label(box, text="", font=("Segoe UI", 8)); info.pack()
+        big = tag(tk.Label(box, text="--:--"), "big"); big.pack()
+        info = tag(tk.Label(box, text="", font=("Segoe UI", 8)), "muted"); info.pack()
         ago = tk.StringVar(value="0")
         r = tk.Frame(box); r.pack(pady=2)
         tk.Label(r, text="Harvested").pack(side="left")
@@ -269,8 +397,8 @@ def gui():
             def f(st, tt): tt["start"] = None; tt["open"] = None
             upd(f)
 
-        tk.Button(box, text="Harvested - start timer", command=start, bg="#3a9d3a", fg="white",
-                  font=("Segoe UI", 10), height=2).pack(fill="x", pady=2)
+        tag(tk.Button(box, text="Harvested - start timer", command=start, font=("Segoe UI", 10), height=2),
+            "accent").pack(fill="x", pady=2)
         tk.Button(box, text="Actually ready now (log)", command=ready).pack(fill="x")
         tk.Button(box, text="Reset", command=reset).pack(fill="x", pady=2)
         vs, cbs = {}, {}
@@ -285,12 +413,34 @@ def gui():
             st = load()
             if len(st["timers"]) > 1:
                 st["timers"] = [x for x in st["timers"] if x["id"] != tid]; save(st)
-        tk.Button(box, text="Remove this timer", command=remove, fg="#a33").pack(fill="x", pady=(4, 0))
+        tag(tk.Button(box, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
         panels[tid] = {"box": box, "big": big, "info": info, "cbs": cbs}
+        paint(box, cur["th"])
 
     def add_timer():
         st = load()
         st["timers"].append(new_timer(f"Table {len(st['timers'])+1}", st["settings"]["default_ups"])); save(st)
+
+    # ---------------------------------------------------------------- welcome (first run)
+    def welcome():
+        w = tk.Toplevel(root)
+        w.title("Welcome")
+        w.attributes("-topmost", True)
+        msg = ("Welcome to the Rob Run Harvest Timer!\n\n"
+               "1.  Tick the upgrades installed on each grow table.\n"
+               "2.  Press \"Harvested - start timer\" the moment you harvest.\n"
+               "3.  You get a sound (and READY!) when the bush has regrown.\n\n"
+               "Grow time = 60 min x (1 - upgrade %).  Everything is adjustable in Settings\n"
+               "(skins, 12/24-hour clock, custom sound, upgrade percentages).\n\n"
+               "Use \"+ Add timer\" for tables with different upgrades.\n\n"
+               "Unofficial fan tool - not affiliated with the ROB RUN developer.")
+        tk.Label(w, text=msg, justify="left", padx=16, pady=12).pack()
+
+        def done():
+            st = load(); st["settings"]["welcomed"] = True; save(st); w.destroy()
+        tk.Button(w, text="Got it", command=done, width=12).pack(pady=(0, 12))
+        w.protocol("WM_DELETE_WINDOW", done)
+        paint(w, cur["th"])
 
     # ---------------------------------------------------------------- settings page
     def open_settings():
@@ -306,8 +456,21 @@ def gui():
         def commit(fn):
             st = load(); fn(st); save(st)
 
+        # --- skin
+        kf = tk.LabelFrame(w, text="Skin", padx=8, pady=6); kf.pack(fill="x", padx=10, pady=(10, 4))
+        skin = tk.StringVar(value=S["skin"])
+
+        def pick_skin():
+            commit(lambda st: st["settings"].__setitem__("skin", skin.get())); set_skin(skin.get())
+        for i, (nm, th) in enumerate(THEMES.items()):   # each chip previews its own skin
+            chip = tk.Radiobutton(kf, text=nm, variable=skin, value=nm, command=pick_skin, indicatoron=False,
+                                  bg=th["bg"], fg=th["fg"], selectcolor=th["accent"], activebackground=th["accent"],
+                                  activeforeground=th["accent_fg"], width=11, pady=4, relief="raised", bd=2)
+            chip._role = "chip"
+            chip.grid(row=i // 3, column=i % 3, padx=3, pady=3)
+
         # --- time settings
-        tf = tk.LabelFrame(w, text="Time", padx=8, pady=4); tf.pack(fill="x", padx=10, pady=(10, 4))
+        tf = tk.LabelFrame(w, text="Time", padx=8, pady=4); tf.pack(fill="x", padx=10, pady=4)
         clk = tk.IntVar(value=S["clock"])
         tk.Label(tf, text="Clock format:").pack(anchor="w")
         for v, t in ((12, "12-hour (3:45:10 PM)"), (24, "24-hour (15:45:10)")):
@@ -359,7 +522,7 @@ def gui():
         sf = tk.Frame(af); sf.pack(anchor="w", fill="x")
         snd = tk.StringVar(value=os.path.basename(S["sound_path"]) or "Built-in beep")
         tk.Label(sf, text="Sound:").pack(side="left")
-        tk.Label(sf, textvariable=snd, width=20, anchor="w", fg="#06c").pack(side="left", padx=4)
+        tag(tk.Label(sf, textvariable=snd, width=20, anchor="w"), "link").pack(side="left", padx=4)
 
         def choose_sound():
             from tkinter import filedialog
@@ -376,7 +539,6 @@ def gui():
         tk.Button(sf, text="Default", command=default_sound).pack(side="left")
         tk.Checkbutton(af, text="Keep window on top of other windows", variable=top,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("topmost", top.get()))).pack(anchor="w")
-
         cb_var = tk.BooleanVar(value=S.get("compact_bar", True))
         tk.Checkbutton(af, text="Slim title bar with small buttons (restart to apply)", variable=cb_var,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("compact_bar", cb_var.get()))).pack(anchor="w")
@@ -384,12 +546,17 @@ def gui():
         def restore():
             def f(st):
                 st["base"] = DEF_BASE
-                st["settings"] = json.loads(json.dumps(DEF_SETTINGS))
+                keep = st["settings"].get("welcomed", True)
+                st["settings"] = json.loads(json.dumps(DEF_SETTINGS)); st["settings"]["welcomed"] = keep
             commit(f)
+            set_skin(DEF_SETTINGS["skin"])
             w.destroy(); open_settings()
-        bf = tk.Frame(w); bf.pack(fill="x", padx=10, pady=(4, 10))
+        bf = tk.Frame(w); bf.pack(fill="x", padx=10, pady=(4, 2))
         tk.Button(bf, text="Restore defaults", command=restore).pack(side="left")
         tk.Button(bf, text="Close", command=w.destroy).pack(side="right")
+        tag(tk.Label(w, text=f"Rob Run Harvest Timer v{VERSION}  -  unofficial fan tool, not affiliated with the "
+                             "ROB RUN developer", font=("Segoe UI", 7)), "muted").pack(pady=(0, 8))
+        paint(w, cur["th"])
 
     bottom = tk.Frame(root); bottom.pack(side="bottom", fill="x", pady=(0, 6))
     tk.Button(bottom, text="+ Add timer", command=add_timer).pack(side="left", padx=8)
@@ -398,6 +565,9 @@ def gui():
     def tick():
         st = load()
         cfg = st["settings"]
+        th = cur["th"]
+        if cfg["skin"] != cur["name"]:
+            set_skin(cfg["skin"]); th = cur["th"]
         if topmost["v"] != cfg["topmost"]:
             topmost["v"] = cfg["topmost"]; root.attributes("-topmost", cfg["topmost"])
         ids = [t["id"] for t in st["timers"]]
@@ -416,10 +586,10 @@ def gui():
                 end = t["start"] + mins * 60
                 left = end - time.time()
                 if left > 0:
-                    p["big"].config(text=fmt(left), fg="black")
+                    p["big"].config(text=fmt(left), fg=th["timer"])
                     p["info"].config(text=f"{mins:.1f} min - ready {clock(st, end)}")
                 else:
-                    p["big"].config(text="READY!", fg="green")
+                    p["big"].config(text="READY!", fg=th["ready"])
                     p["info"].config(text=f"since {clock(st, end)}")
                     if not alerted.get(t["id"]):
                         alerted[t["id"]] = True
@@ -428,24 +598,32 @@ def gui():
                         root.deiconify(); root.lift()
             else:
                 last = [c for c in st["cycles"] if c.get("timer") == t["name"]]
-                p["big"].config(text="--:--", fg="black")
+                p["big"].config(text="--:--", fg=th["timer"])
                 p["info"].config(text=f"{mins:.1f} min" + (f" - last logged {last[-1]['minutes']:.2f}" if last else ""))
         root.after(500, tick)
 
+    set_skin(cur["name"])
+    if not load()["settings"]["welcomed"]:
+        root.after(500, welcome)
     tick()
     root.mainloop()
 
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) == 1:
         gui()
     else:
-        p = argparse.ArgumentParser()
+        p = argparse.ArgumentParser(description="Rob Run Harvest Timer (no arguments = open the GUI)")
         p.add_argument("cmd", choices=["start", "ready", "set", "add", "remove", "status"])
         p.add_argument("--timer", type=int)
         p.add_argument("--ago", type=float, default=0.0)
         p.add_argument("--base", type=float)
         p.add_argument("--clock", type=int, choices=[12, 24])
+        p.add_argument("--skin")
         p.add_argument("--ups")
         p.add_argument("--name")
         cli(p.parse_args())
+
+
+if __name__ == "__main__":
+    main()
