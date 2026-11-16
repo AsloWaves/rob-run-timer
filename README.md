@@ -49,3 +49,8 @@ Unsigned builds may show a Windows SmartScreen warning ("More info" > "Run anywa
 - Window position and size are remembered; the Modern skin now has truly rounded window corners.
 - **History / calibrate** (Settings): compares logged cycles with the formula and can correct an unverified upgrade's percentage (UV Lamp).
 - Checks GitHub for a newer release at start-up (can be turned off).
+
+## License
+
+[MIT](LICENSE) (c) 2026 AsloWaves. The packaged exe bundles Python and Tk, which are under their own permissive licenses.
+This is an unofficial fan tool and is not affiliated with the ROB RUN developer; the game's name and art belong to its owners.
