@@ -1,0 +1,44 @@
+name: Build
+
+# Builds the exe on GitHub's servers from the code in this repo. Push a tag like v1.2.1 to build and attach
+# it to that release; or run it by hand from the Actions tab to just get the exe as a downloadable artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build RobRunTimer.exe
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pyinstaller
+          python tools/make_version_info.py build/version_info.txt
+          pyinstaller --noconfirm --clean --onefile --windowed --name RobRunTimer --icon assets/icon.ico `
+            --add-data "assets/icon.ico;assets" --version-file build/version_info.txt rob_run_timer.py
+          (Get-FileHash dist/RobRunTimer.exe -Algorithm SHA256).Hash
+      - name: Upload the unsigned exe
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: RobRunTimer-unsigned
+          path: dist/RobRunTimer.exe
+      # Code signing (SignPath) goes here once the project is approved.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.ref_name }}" 2>$null
+          if ($LASTEXITCODE -eq 0) { gh release upload "${{ github.ref_name }}" dist/RobRunTimer.exe --clobber }
+          else { gh release create "${{ github.ref_name }}" dist/RobRunTimer.exe --title "${{ github.ref_name }}" --generate-notes }

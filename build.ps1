@@ -4,8 +4,10 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 if (-not (Test-Path .venv-build)) { python -m venv .venv-build }
 .\.venv-build\Scripts\python -m pip install --quiet --upgrade pyinstaller
+.\.venv-build\Scripts\python tools\make_version_info.py build\version_info.txt
 .\.venv-build\Scripts\pyinstaller --noconfirm --clean --onefile --windowed `
-    --name RobRunTimer --icon assets\icon.ico --add-data "assets\icon.ico;assets" rob_run_timer.py
+    --name RobRunTimer --icon assets\icon.ico --add-data "assets\icon.ico;assets" `
+    --version-file build\version_info.txt rob_run_timer.py
 $exe = "dist\RobRunTimer.exe"
 "{0}  {1:N1} MB" -f $exe, ((Get-Item $exe).Length / 1MB)
 "SHA256: " + (Get-FileHash $exe -Algorithm SHA256).Hash

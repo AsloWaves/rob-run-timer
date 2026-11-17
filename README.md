@@ -55,6 +55,17 @@ Unsigned builds may show a Windows SmartScreen warning ("More info" > "Run anywa
 - **Grow room** window (button in the bottom bar): the six grow tables with six bushes each, upgrades per table, estimated profit per hour when you harvest on time, and what your stored loot sells for solo at your Notoriety level (solo starts at 4, +35%). Prices and yields are community figures, editable in the window.
 - **Linked timers**: a timer can link to a grow table and takes its upgrades from it. "Start a timer for this table" adds one only for the tables you want.
 
+## Code signing policy and privacy
+
+Releases are built from this repository by the GitHub Actions workflow in `.github/workflows/build.yml`.
+Code signing is being applied for through the SignPath Foundation. Until it is approved, releases are unsigned.
+Once signed, the credit will read: *Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).*
+
+- **Author, reviewer and approver:** [AsloWaves](https://github.com/AsloWaves), the sole maintainer.
+- **Only this project's own code is signed.** Nothing from other projects is signed on their behalf.
+
+**Privacy.** The app has no accounts, analytics or telemetry, and sends none of your data anywhere. Its only network request is the optional update check at start-up: one anonymous call to GitHub's public releases API (Settings > Check for updates turns it off). Timers and settings are stored locally in `%APPDATA%\RobRunTimer\state.json`. It writes one registry value under `HKCU\Software\Classes\AppUserModelId` so notifications show the app name and icon, and, only if you enable "Start with Windows", one value under `HKCU\...\Run`. Both are per-user. Turning off "Start with Windows" removes the second; the first can be deleted by hand.
+
 ## License
 
 [MIT](LICENSE) (c) 2026 AsloWaves. The packaged exe bundles Python and Tk, which are under their own permissive licenses.
