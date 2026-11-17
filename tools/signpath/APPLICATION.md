@@ -1,6 +1,7 @@
 # SignPath Foundation application (draft, paste into the form at https://signpath.org/apply)
 
 - **Project name:** Rob Run Harvest Timer
+- **Homepage URL:** https://github.com/AsloWaves/rob-run-timer
 - **Repository:** https://github.com/AsloWaves/rob-run-timer
 - **Download page:** https://github.com/AsloWaves/rob-run-timer/releases
 - **License:** MIT (OSI-approved, no dual licensing, no proprietary components)
