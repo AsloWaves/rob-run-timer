@@ -15,7 +15,7 @@ CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer
 import argparse, json, os, queue, re, shutil, sys, time
 from datetime import datetime
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 DIR = os.path.dirname(os.path.abspath(__file__))
 # Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
 # ROBRUN_STATE can point somewhere else (testing).
@@ -118,14 +118,38 @@ DEF_SETTINGS = {
 }
 DEF_BASE = 60.0
 
+# The grow room: six tables, six bushes each (0 Uncommon, 1 Epic, 2 Legendary), upgrades per table and the
+# selling assumptions. Prices are community figures at Notoriety 1 (the developer has not published them).
+RARITY = ("Uncommon", "Epic", "Legendary")
+NOTOR_BONUS = (0.0, 0.10, 0.20, 0.35, 0.50)         # Fence bonus at Notoriety 1..5 (solo starts at 4)
+UP_COST = {"fan": 25000, "pump": 70000, "uv": 250000}
+DEF_ROOM = {"prices": [4000, 6000, 8000], "bags": 3.0, "notor": 4, "stock": 0.0, "harvest_sec": 5.0}
+
+
+def new_room(ups):
+    r = json.loads(json.dumps(DEF_ROOM))
+    r["tables"] = [{"ups": list(ups), "plants": [0] * 6} for _ in range(6)]
+    return r
+
+
+def eff_ups(s, t):
+    """Upgrades a timer uses: those of its linked grow-room table, otherwise its own ticks."""
+    i = t.get("table")
+    tabs = s.get("room", {}).get("tables", [])
+    if isinstance(i, int) and 0 <= i < len(tabs):
+        return [u for u in UP_KEYS if u in tabs[i]["ups"]]
+    return t["ups"]
+
 
 def new_timer(name, ups):
-    return {"id": str(int(time.time() * 1000)), "name": name, "ups": list(ups), "start": None, "open": None}
+    return {"id": str(int(time.time() * 1000)), "name": name, "ups": list(ups), "start": None, "open": None,
+            "table": None}
 
 
 def default():
     return {"base": DEF_BASE, "settings": json.loads(json.dumps(DEF_SETTINGS)),
-            "timers": [new_timer("Table 1", DEF_SETTINGS["default_ups"])], "cycles": []}
+            "timers": [new_timer("Table 1", DEF_SETTINGS["default_ups"])], "cycles": [],
+            "room": new_room(DEF_SETTINGS["default_ups"])}
 
 
 def _migrate_legacy():
@@ -180,6 +204,16 @@ def load():
     if st["skin"] not in THEMES:
         st["skin"] = DEF_SETTINGS["skin"]
     out["settings"] = st
+    room = new_room(st["default_ups"])
+    got = s.get("room") if isinstance(s.get("room"), dict) else {}
+    for k in DEF_ROOM:
+        if k in got:
+            room[k] = got[k]
+    for i, tb in enumerate((got.get("tables") or [])[:6]):
+        if isinstance(tb, dict):
+            room["tables"][i] = {"ups": [u for u in UP_KEYS if u in tb.get("ups", [])],
+                                 "plants": [(p if p in (0, 1, 2) else 0) for p in (list(tb.get("plants", [])) + [0] * 6)[:6]]}
+    out["room"] = room
     return out
 
 
@@ -192,7 +226,7 @@ def save(s):
 
 
 def minutes(s, t):
-    return s["base"] * (1 - sum(s["settings"]["pct"][u] / 100 for u in t["ups"]))
+    return s["base"] * (1 - sum(s["settings"]["pct"][u] / 100 for u in eff_ups(s, t)))
 
 
 def fmt(sec):
@@ -237,7 +271,7 @@ def find(s, tid):
 
 def do_start(s, t, ago=0.0):
     t["start"] = time.time() - ago * 60
-    t["open"] = {"timer": t["name"], "start": t["start"], "ups": list(t["ups"])}
+    t["open"] = {"timer": t["name"], "start": t["start"], "ups": list(eff_ups(s, t))}
     save(s)
 
 
@@ -1188,6 +1222,9 @@ def gui():
         if w is not None and w.winfo_exists():
             paint(w, cur["th"])
             set_corners(w, cur["th"]["round"])
+        rw = room_win["w"]
+        if rw is not None and rw.winfo_exists():
+            paint(rw, cur["th"])
 
     def build_panel(t):
         tid = t["id"]
@@ -1253,12 +1290,27 @@ def gui():
             cbs[u] = tk.Checkbutton(inner, text=UP_NAMES[u], variable=vs[u], command=cb)
             cbs[u].pack(anchor="w")
 
+        def cycle_link():
+            def f(st, tt):
+                cur_i = tt.get("table")
+                prev = eff_ups(st, tt)
+                nxt = 0 if cur_i is None else cur_i + 1
+                tt["table"] = nxt if nxt < 6 else None
+                if tt["table"] is None:
+                    tt["ups"] = prev        # unlinking keeps the upgrades the table had
+                if tt["table"] is not None:
+                    tt["name"] = f"Table {tt['table'] + 1}"
+                    name.set(tt["name"])
+            upd(f)
+        link = Btn(inner, text="Grow table: not linked", command=cycle_link)
+        link.pack(fill="x", pady=(4, 0))
+
         def remove():
             st = load()
             if len(st["timers"]) > 1:
                 st["timers"] = [x for x in st["timers"] if x["id"] != tid]; save(st)
         tag(Btn(inner, text="Remove this timer", command=remove), "danger").pack(fill="x", pady=(4, 0))
-        panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs, "slbl": slbl}
+        panels[tid] = {"box": box, "disp": disp, "info": info, "cbs": cbs, "slbl": slbl, "vs": vs, "link": link}
         paint(box, cur["th"])
 
     def add_timer():
@@ -1535,6 +1587,182 @@ def gui():
                 break
 
     # ---------------------------------------------------------------- harvest actions (buttons + hotkeys)
+    # ---------------------------------------------------------------- grow room window
+    room_win = {"w": None, "upd": None}
+    RCOL = {0: ("#3f9d5a", "#ffffff"), 1: ("#8a5bd6", "#ffffff"), 2: ("#d29a10", "#16130a")}
+
+    def money(n):
+        return "$" + format(int(round(n)), ",")
+
+    def room_calc(st):
+        """Per-table and whole-room numbers at the chosen Notoriety, harvesting right on time."""
+        rm, cfg = st["room"], st["settings"]
+        mult = 1 + NOTOR_BONUS[max(1, min(5, int(rm["notor"]))) - 1]
+        out = []
+        for tb in rm["tables"]:
+            grow = st["base"] * (1 - sum(cfg["pct"][u] / 100 for u in tb["ups"]))
+            rev = sum(rm["prices"][r] * rm["bags"] * mult for r in tb["plants"])
+            cycle = grow + rm["harvest_sec"] * 6 / 60
+            out.append({"grow": grow, "rev": rev, "hour": rev / (cycle / 60) if cycle > 0 else 0})
+        return mult, out
+
+    def open_room():
+        if room_win["w"] is not None and room_win["w"].winfo_exists():
+            room_win["w"].lift(); return
+        w = tk.Toplevel(root)
+        w.title("Grow Room")
+        w.attributes("-topmost", True)
+        room_win["w"] = w
+
+        def commit(fn):
+            st = load(); fn(st); save(st); room_refresh()
+
+        # --- summary
+        sumf = tk.LabelFrame(w, text="Whole room at the chosen Notoriety", padx=8, pady=4)
+        sumf.pack(fill="x", padx=10, pady=(10, 4))
+        sums = {}
+        for i, (k, lab) in enumerate((("hour", "Income per hour"), ("day", "Per 24 hours"),
+                                      ("round", "One full harvest"), ("spend", "Upgrades fitted (purchase price)"))):
+            tag(tk.Label(sumf, text=lab, font=("Segoe UI", 8)), "muted").grid(row=0, column=i, padx=10, sticky="w")
+            sums[k] = tk.Label(sumf, text="-", font=("Segoe UI", 12, "bold"))
+            sums[k].grid(row=1, column=i, padx=10, sticky="w")
+
+        # --- six tables
+        grid = tk.Frame(w); grid.pack(padx=6)
+        tabw = []
+        for i in range(6):
+            lf = tk.LabelFrame(grid, text=f"Table {i + 1}", padx=6, pady=4)
+            lf.grid(row=i // 3, column=i % 3, padx=4, pady=4, sticky="n")
+            pb = tk.Frame(lf); pb.pack()
+            pbtn = []
+            for j in range(6):
+                def cyc(i=i, j=j):
+                    def f(st):
+                        pl = st["room"]["tables"][i]["plants"]; pl[j] = (pl[j] + 1) % 3
+                    commit(f)
+                b = tk.Button(pb, text="", width=9, command=cyc)
+                b.grid(row=j // 3, column=j % 3, padx=1, pady=1)
+                pbtn.append(b)
+            qa = tk.Frame(lf); qa.pack(pady=2)
+            tk.Label(qa, text="All:").pack(side="left")
+            for k, nm in enumerate(RARITY):
+                def setall(i=i, k=k):
+                    commit(lambda st: st["room"]["tables"][i].__setitem__("plants", [k] * 6))
+                tk.Button(qa, text=nm, command=setall).pack(side="left", padx=1)
+            vs = {}
+            ur = tk.Frame(lf); ur.pack(anchor="w")
+            for u in UP_KEYS:
+                vs[u] = tk.BooleanVar(value=False)
+
+                def cbu(i=i):
+                    commit(lambda st: st["room"]["tables"][i].__setitem__("ups", [k for k in UP_KEYS if vs_all[i][k].get()]))
+                tk.Checkbutton(ur, text=UP_NAMES[u], variable=vs[u], command=cbu).pack(side="left")
+            tl = tk.Label(lf, text="", font=("Segoe UI", 10, "bold")); tl.pack(anchor="w")
+            il = tag(tk.Label(lf, text="", font=("Segoe UI", 8)), "muted"); il.pack(anchor="w")
+            tm = tag(tk.Label(lf, text="", font=("Segoe UI", 8)), "muted"); tm.pack(anchor="w")
+
+            def addt(i=i):
+                def f(st):
+                    if not any(t.get("table") == i for t in st["timers"]):
+                        t = new_timer(f"Table {i + 1}", st["settings"]["default_ups"]); t["table"] = i
+                        t["id"] = str(int(time.time() * 1000) + i)
+                        st["timers"].append(t)
+                commit(f)
+            Btn(lf, text="Start a timer for this table", command=addt).pack(fill="x", pady=(2, 0))
+            tabw.append({"pb": pbtn, "vs": vs, "tl": tl, "il": il, "tm": tm})
+        vs_all = [t["vs"] for t in tabw]
+
+        # --- selling
+        sf = tk.LabelFrame(w, text="Selling the spoils (Fence, solo)", padx=8, pady=4)
+        sf.pack(fill="x", padx=10, pady=4)
+        nv = tk.IntVar(value=4)
+        nr = tk.Frame(sf); nr.pack(anchor="w")
+        tk.Label(nr, text="Notoriety (solo starts at 4):").pack(side="left")
+        for n in range(1, 6):
+            tk.Radiobutton(nr, text=f"{n}  +{int(NOTOR_BONUS[n - 1] * 100)}%", variable=nv, value=n,
+                           command=lambda: commit(lambda st: st["room"].__setitem__("notor", nv.get()))).pack(side="left", padx=2)
+        sr = tk.Frame(sf); sr.pack(anchor="w", pady=2)
+        stock = tk.StringVar(value=f"{load()['room']['stock']:g}")
+        tk.Label(sr, text="Storage value shown in game ($):").pack(side="left")
+        REntry(sr, textvariable=stock, width=12).pack(side="left", padx=4)
+
+        def stock_changed(*_):
+            try: v = float(stock.get().replace(",", "").replace("$", ""))
+            except ValueError: return
+            if v >= 0: commit(lambda st: st["room"].__setitem__("stock", v))
+        stock.trace_add("write", stock_changed)
+        sold = tk.Label(sf, text="", font=("Segoe UI", 11, "bold")); sold.pack(anchor="w")
+        tag(tk.Label(sf, text="The bonus is added on top of the level 1 Fence prices below. If the storage value you type\n"
+                              "already includes it, pick Notoriety 1 so it is not counted twice.",
+                     font=("Segoe UI", 8), justify="left"), "muted").pack(anchor="w")
+
+        # --- assumptions
+        af = tk.LabelFrame(w, text="Assumptions (community figures, not official)", padx=8, pady=4)
+        af.pack(fill="x", padx=10, pady=4)
+        avars = {}
+        arow = tk.Frame(af); arow.pack(anchor="w")
+        rm0 = load()["room"]
+        fields = [("p0", "Uncommon $/bag", rm0["prices"][0]), ("p1", "Epic $/bag", rm0["prices"][1]),
+                  ("p2", "Legendary $/bag", rm0["prices"][2]), ("bags", "Bags per bush", rm0["bags"]),
+                  ("sec", "Harvest sec/bush", rm0["harvest_sec"])]
+        for k, (key, lab, val) in enumerate(fields):
+            tk.Label(arow, text=lab).grid(row=0, column=k, padx=4, sticky="w")
+            avars[key] = tk.StringVar(value=f"{val:g}")
+            REntry(arow, textvariable=avars[key], width=9).grid(row=1, column=k, padx=4)
+
+            def achanged(*_, key=key):
+                try: v = float(avars[key].get())
+                except ValueError: return
+                if v < 0: return
+
+                def f(st):
+                    rm = st["room"]
+                    if key[0] == "p" and key[1:].isdigit(): rm["prices"][int(key[1:])] = v
+                    elif key == "bags": rm["bags"] = v
+                    else: rm["harvest_sec"] = v
+                commit(f)
+            avars[key].trace_add("write", achanged)
+        tag(tk.Label(af, text="Grow time and the upgrade percentages come from Settings. Linked timers take their upgrades "
+                              "from the tables above.", font=("Segoe UI", 8)), "muted").pack(anchor="w")
+        Btn(w, text="Close", command=w.destroy).pack(side="right", padx=10, pady=(2, 10))
+
+        def room_refresh():
+            if w is None or not w.winfo_exists():
+                return
+            st = load()
+            mult, res = room_calc(st)
+            cfg = st["settings"]
+            total = sum(r["hour"] for r in res); rnd = sum(r["rev"] for r in res)
+            spend = sum(UP_COST[u] for tb in st["room"]["tables"] for u in tb["ups"])
+            sums["hour"].config(text=money(total) + "/h"); sums["day"].config(text=money(total * 24))
+            sums["round"].config(text=money(rnd)); sums["spend"].config(text=money(spend))
+            nv.set(int(st["room"]["notor"]))
+            stk = st["room"]["stock"] * mult
+            sold.config(text=f"Storage sold solo: {money(stk)}     Storage + one full harvest: {money(stk + rnd)}")
+            for i, (tb, r, tw) in enumerate(zip(st["room"]["tables"], res, tabw)):
+                for j, p in enumerate(tb["plants"]):
+                    bg, fg = RCOL[p]
+                    tw["pb"][j].config(text=RARITY[p], bg=bg, fg=fg, activebackground=bg, activeforeground=fg,
+                                       relief="raised", bd=1)
+                for u in UP_KEYS:
+                    if tw["vs"][u].get() != (u in tb["ups"]):
+                        tw["vs"][u].set(u in tb["ups"])
+                tw["tl"].config(text=f"{money(r['hour'])}/h")
+                tw["il"].config(text=f"ready every {r['grow']:.1f} min, {money(r['rev'])} per harvest")
+                linked = [t for t in st["timers"] if t.get("table") == i]
+                if not linked:
+                    tw["tm"].config(text="No timer linked")
+                else:
+                    t = linked[0]
+                    if t["start"]:
+                        left = t["start"] + minutes(st, t) * 60 - time.time()
+                        tw["tm"].config(text="Timer: " + (f"{fmt(left)} left" if left > 0 else "READY"))
+                    else:
+                        tw["tm"].config(text="Timer: not started")
+        room_win["upd"] = room_refresh
+        paint(w, cur["th"])
+        room_refresh()
+
     def is_ready(st, t):
         return t["start"] is None or time.time() >= t["start"] + minutes(st, t) * 60
 
@@ -1573,6 +1801,7 @@ def gui():
     Btn(bottom, text="Harvest all", command=lambda: harvest("all")).pack(side="left")
     upd_lbl = tag(tk.Label(bottom, text="", cursor="hand2", font=("Segoe UI", 8, "underline")), "link")
     Btn(bottom, text="Settings", command=open_settings).pack(side="right", padx=(0, 22))
+    Btn(bottom, text="Grow room", command=open_room).pack(side="right", padx=6)
     Btn(bottom, text="Clock only", command=lambda: toggle_mini()).pack(side="right", padx=6)
 
     # ---------------------------------------------------------------- clock-only view + window resizing
@@ -1674,8 +1903,16 @@ def gui():
         many = len(st["timers"]) > 1
         for t in st["timers"]:
             p = panels[t["id"]]
+            lk = t.get("table")
+            eu = eff_ups(st, t)
             for u in UP_KEYS:
-                p["cbs"][u].config(text=f"{UP_NAMES[u]} -{cfg['pct'][u]:g}%")
+                p["cbs"][u].config(text=f"{UP_NAMES[u]} -{cfg['pct'][u]:g}%",
+                                   state="disabled" if lk is not None else "normal")
+                if p["vs"][u].get() != (u in eu):
+                    p["vs"][u].set(u in eu)
+            lt = "Grow table: not linked (click)" if lk is None else f"Linked to grow table {lk + 1} (click)"
+            if p["link"].b.cget("text") != lt:
+                p["link"].b.config(text=lt)
             mins = minutes(st, t)
             p["slbl"].config(text="Sound: " + (os.path.basename(t["sound"]) if t.get("sound") else "default"))
             disp = ensure_mini(t, many) if mini else p["disp"]
@@ -1716,6 +1953,11 @@ def gui():
 
     def tick():
         refresh()
+        try:
+            if room_win["upd"] and room_win["w"] is not None and room_win["w"].winfo_exists():
+                room_win["upd"]()
+        except Exception as e:
+            dbg("room refresh: %r" % (e,))
         root.after(500, tick)
 
     set_skin(cur["name"])

@@ -50,6 +50,11 @@ Unsigned builds may show a Windows SmartScreen warning ("More info" > "Run anywa
 - **History / calibrate** (Settings): compares logged cycles with the formula and can correct an unverified upgrade's percentage (UV Lamp).
 - Checks GitHub for a newer release at start-up (can be turned off).
 
+## New in 1.2
+
+- **Grow room** window (button in the bottom bar): the six grow tables with six bushes each, upgrades per table, estimated profit per hour when you harvest on time, and what your stored loot sells for solo at your Notoriety level (solo starts at 4, +35%). Prices and yields are community figures, editable in the window.
+- **Linked timers**: a timer can link to a grow table and takes its upgrades from it. "Start a timer for this table" adds one only for the tables you want.
+
 ## License
 
 [MIT](LICENSE) (c) 2026 AsloWaves. The packaged exe bundles Python and Tk, which are under their own permissive licenses.
