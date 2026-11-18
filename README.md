@@ -55,6 +55,11 @@ Unsigned builds may show a Windows SmartScreen warning ("More info" > "Run anywa
 - **Grow room** window (button in the bottom bar): the six grow tables with six bushes each, upgrades per table, estimated profit per hour when you harvest on time, and what your stored loot sells for solo at your Notoriety level (solo starts at 4, +35%). Prices and yields are community figures, editable in the window.
 - **Linked timers**: a timer can link to a grow table and takes its upgrades from it. "Start a timer for this table" adds one only for the tables you want.
 
+## New in 1.3
+
+- **One-click updates**: when a newer release is out, the bottom bar shows **Update to vX**. Click it and the app downloads the new exe from the GitHub release, checks it against the release's SHA-256, swaps it in place of the current exe (same file name and folder, so shortcuts and "Start with Windows" keep working) and restarts. Timers and settings are untouched. If the download fails or the folder isn't writable, nothing is replaced and the link opens the release page instead. (Updating *to* 1.3 from an older version is still a manual download, once.)
+- **Start Menu shortcut**: the app adds itself to the Start Menu so Windows search finds "Rob Run Timer". It repoints the shortcut if you move the exe. Turn it off in Settings > Window.
+
 ## Code signing policy and privacy
 
 Releases are built from this repository by the GitHub Actions workflow in `.github/workflows/build.yml`.
@@ -64,7 +69,7 @@ Once signed, the credit will read: *Free code signing provided by [SignPath.io](
 - **Author, reviewer and approver:** [AsloWaves](https://github.com/AsloWaves), the sole maintainer.
 - **Only this project's own code is signed.** Nothing from other projects is signed on their behalf.
 
-**Privacy.** The app has no accounts, analytics or telemetry, and sends none of your data anywhere. Its only network request is the optional update check at start-up: one anonymous call to GitHub's public releases API (Settings > Check for updates turns it off). Timers and settings are stored locally in `%APPDATA%\RobRunTimer\state.json`. It writes one registry value under `HKCU\Software\Classes\AppUserModelId` so notifications show the app name and icon, and, only if you enable "Start with Windows", one value under `HKCU\...\Run`. Both are per-user. Turning off "Start with Windows" removes the second; the first can be deleted by hand.
+**Privacy.** The app has no accounts, analytics or telemetry, and sends none of your data anywhere. Its only network requests are the optional update check at start-up (one anonymous call to GitHub's public releases API; Settings > Check for updates turns it off) and, only when you click Update, downloading the new exe from that GitHub release. Timers and settings are stored locally in `%APPDATA%\RobRunTimer\state.json`. It writes one registry value under `HKCU\Software\Classes\AppUserModelId` so notifications show the app name and icon, and, only if you enable "Start with Windows", one value under `HKCU\...\Run`. It also keeps a shortcut at `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Rob Run Timer.lnk` (Settings turns it off and removes it). All of these are per-user. Turning off "Start with Windows" removes the second; the first can be deleted by hand.
 
 ## License
 

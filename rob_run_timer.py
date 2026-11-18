@@ -15,7 +15,7 @@ CLI:   python rob_run_timer.py start [--timer N] [--ago MIN]   N = 1-based timer
 import argparse, json, os, queue, re, shutil, sys, time
 from datetime import datetime
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DIR = os.path.dirname(os.path.abspath(__file__))
 # Saved data lives in %APPDATA%\RobRunTimer so it survives updates and works from a packaged .exe.
 # ROBRUN_STATE can point somewhere else (testing).
@@ -113,6 +113,8 @@ DEF_SETTINGS = {
     "opacity": 100,                    # window opacity in percent
     "clickthrough": False,             # clock-only view ignores the mouse (toggle with its hotkey)
     "check_updates": True,             # look for a newer release on GitHub at start-up
+    "start_menu": True,                # keep a Start Menu shortcut (so Windows search finds the app)
+    "start_menu_target": None,         # exe the shortcut was last pointed at (re-made if the exe moves)
     "pos": None,                       # last window position [x, y]
     "size": {},                        # last window size per view
 }
@@ -504,18 +506,114 @@ def _ver(s):
 
 
 def check_update(q):
-    """Ask GitHub for the latest release; queue (version, url) if it is newer. Silent on any failure."""
+    """Ask GitHub for the latest release; queue an info dict if it is newer. Silent on any failure.
+    ROBRUN_UPDATE_API can point at another releases/latest-style JSON (testing)."""
     try:
         import urllib.request
-        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
-                                     headers={"User-Agent": "RobRunTimer", "Accept": "application/vnd.github+json"})
+        url = os.environ.get("ROBRUN_UPDATE_API") or f"https://api.github.com/repos/{REPO}/releases/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": "RobRunTimer", "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=6) as r:
             d = json.load(r)
         tag = d.get("tag_name", "")
         if _ver(tag) > _ver(VERSION):
-            q.put((tag.lstrip("vV"), d.get("html_url", "")))
+            exe = next((a for a in d.get("assets", []) if a.get("name", "").lower() == "robruntimer.exe"), {})
+            q.put({"ver": tag.lstrip("vV"), "page": d.get("html_url", ""), "exe": exe.get("browser_download_url"),
+                   "size": exe.get("size"), "sha256": (exe.get("digest") or "").partition("sha256:")[2].lower() or None})
     except Exception:
         pass
+
+
+def can_self_update():
+    """Only the packaged exe replaces itself, and only if its folder is writable."""
+    if not getattr(sys, "frozen", False):
+        return False
+    d = os.path.dirname(sys.executable)
+    try:
+        probe = os.path.join(d, ".robrun_write_test")
+        open(probe, "w").close(); os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def download_update(info, progress=None):
+    """Download the new exe next to the running one as RobRunTimer.exe.new and check it. Returns its path."""
+    import hashlib, urllib.request
+    new = sys.executable + ".new"
+    req = urllib.request.Request(info["exe"], headers={"User-Agent": "RobRunTimer"})
+    h, got = hashlib.sha256(), 0
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(new, "wb") as f:
+            total = info.get("size") or int(r.headers.get("Content-Length") or 0)
+            while True:
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk); h.update(chunk); got += len(chunk)
+                if progress and total:
+                    progress(got / total)
+        with open(new, "rb") as f:
+            if f.read(2) != b"MZ":
+                raise ValueError("download is not a Windows program")
+        if info.get("size") and got != info["size"]:
+            raise ValueError("download is incomplete")
+        if info.get("sha256") and h.hexdigest() != info["sha256"]:
+            raise ValueError("download failed its checksum")
+        return new
+    except Exception:
+        try: os.remove(new)
+        except Exception: pass
+        raise
+
+
+def swap_in_update(new):
+    """Put the downloaded exe in place of the running one. Windows lets a running exe be renamed but not
+    deleted, so the old one becomes RobRunTimer.exe.old and is removed by the next start-up."""
+    exe, old = sys.executable, sys.executable + ".old"
+    try: os.remove(old)
+    except FileNotFoundError: pass
+    os.replace(exe, old)
+    try:
+        os.replace(new, exe)
+    except Exception:
+        os.replace(old, exe)       # put the original back so the app still starts
+        raise
+    return exe
+
+
+def cleanup_old_exe(tries=6):
+    """Remove the RobRunTimer.exe.old left by an update (it stays locked until the old copy has exited)."""
+    if not getattr(sys, "frozen", False):
+        return True
+    for p in (sys.executable + ".old", sys.executable + ".new"):
+        if os.path.exists(p):
+            try: os.remove(p)
+            except Exception: return False
+    return True
+
+
+START_MENU_LNK = os.environ.get("ROBRUN_START_MENU") or os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs",
+                              "Rob Run Timer.lnk")
+
+
+def start_menu_sync(on):
+    """Create (or repoint) / remove the per-user Start Menu shortcut so Windows search finds the app.
+    Only the packaged exe makes one. Returns the target it now points at, or None."""
+    if not on:
+        try: os.remove(START_MENU_LNK)
+        except Exception: pass
+        return None
+    if not getattr(sys, "frozen", False) or not os.environ.get("APPDATA"):
+        return None
+    import subprocess
+    ps = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:RR_LNK);"
+          "$s.TargetPath=$env:RR_EXE;$s.WorkingDirectory=(Split-Path $env:RR_EXE);"
+          "$s.IconLocation=$env:RR_EXE+',0';$s.Description='Rob Run Harvest Timer';$s.Save()")
+    os.makedirs(os.path.dirname(START_MENU_LNK), exist_ok=True)
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+                   env=dict(os.environ, RR_LNK=START_MENU_LNK, RR_EXE=sys.executable), creationflags=0x08000000,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    return sys.executable if os.path.exists(START_MENU_LNK) else None
 
 
 def suggest_pcts(s):
@@ -574,7 +672,11 @@ def single_instance():
     try:
         import ctypes
         k = ctypes.windll.kernel32
-        single_instance.handle = k.CreateMutexW(None, False, "Local\\RobRunHarvestTimer")
+        name = "Local\\RobRunHarvestTimer"
+        if os.environ.get("ROBRUN_STATE"):   # a test copy with its own data can run beside the real one
+            import zlib
+            name += "-%08x" % zlib.crc32(os.path.abspath(STATE).lower().encode("utf-8"))
+        single_instance.handle = k.CreateMutexW(None, False, name)
         return k.GetLastError() != 183
     except Exception:
         return True
@@ -1504,6 +1606,16 @@ def gui():
         tk.Checkbutton(xf, text="Start with Windows", variable=avar, command=set_auto).pack(anchor="w")
         tk.Checkbutton(xf, text="Check for updates at start-up", variable=uvar,
                        command=lambda: commit(lambda st: st["settings"].__setitem__("check_updates", uvar.get()))).pack(anchor="w")
+        mvar = tk.BooleanVar(value=S.get("start_menu", True))
+
+        def set_menu():
+            def f(st):
+                st["settings"]["start_menu"] = mvar.get()
+                try: st["settings"]["start_menu_target"] = start_menu_sync(mvar.get())
+                except Exception: st["settings"]["start_menu_target"] = None
+            commit(f)
+        tk.Checkbutton(xf, text="Start Menu shortcut (find it in Windows search)", variable=mvar,
+                       command=set_menu).pack(anchor="w")
 
         def restore():
             def f(st):
@@ -1960,6 +2072,24 @@ def gui():
             dbg("room refresh: %r" % (e,))
         root.after(500, tick)
 
+    def tidy_old(n=0):     # remove the previous exe left behind by an update
+        if not cleanup_old_exe() and n < 10:
+            root.after(3000, lambda: tidy_old(n + 1))
+    tidy_old()
+
+    def sync_menu():       # make / repoint the Start Menu shortcut (first run, or the exe was moved)
+        s = load()["settings"]
+        if not s.get("start_menu", True) or not getattr(sys, "frozen", False):
+            return
+        if s.get("start_menu_target") == sys.executable and os.path.exists(START_MENU_LNK):
+            return
+        try:
+            tgt = start_menu_sync(True)
+        except Exception as e:
+            dbg("start menu: %r" % (e,)); return
+        st = load(); st["settings"]["start_menu_target"] = tgt; save(st)
+    root.after(1500, sync_menu)
+
     set_skin(cur["name"])
     if not load()["settings"]["welcomed"]:
         root.after(500, welcome)
@@ -1970,15 +2100,77 @@ def gui():
         uq = queue.Queue()
         threading.Thread(target=check_update, args=(uq,), daemon=True).start()
 
+        upd = {"busy": False}
+
         def show_update():
             try:
-                ver, url = uq.get_nowait()
+                info = uq.get_nowait()
             except queue.Empty:
                 root.after(2000, show_update); return
-            upd_lbl.config(text=f"Update v{ver} available")
-            upd_lbl.bind("<Button-1>", lambda e: webbrowser.open(url or f"https://github.com/{REPO}/releases"))
+            page = info["page"] or f"https://github.com/{REPO}/releases"
+            auto = bool(info["exe"]) and can_self_update()
+            upd_lbl.config(text=f"Update to v{info['ver']}" if auto else f"Update v{info['ver']} available")
+            upd_lbl.bind("<Button-1>", lambda e: start_update(info) if auto else webbrowser.open(page))
             upd_lbl.pack(side="left", padx=8)
             paint(upd_lbl, cur["th"])
+            if auto and os.environ.get("ROBRUN_AUTO_UPDATE"):   # testing: click it straight away
+                root.after(500, lambda: start_update(info))
+
+        def start_update(info):
+            """Download in the background, then swap the exe and restart into the new version."""
+            if upd["busy"]:
+                return
+            upd["busy"] = True
+            dq = queue.Queue()
+            upd_lbl.config(text="Downloading update...")
+
+            def work():
+                try:
+                    dq.put(("done", download_update(info, lambda f: dq.put(("pct", f)))))
+                except Exception as e:
+                    dq.put(("fail", e))
+            threading.Thread(target=work, daemon=True).start()
+
+            def wait():
+                try:
+                    while True:
+                        kind, val = dq.get_nowait()
+                        if kind == "pct":
+                            upd_lbl.config(text=f"Downloading update... {int(val * 100)}%")
+                        elif kind == "fail":
+                            fail(info, val); return
+                        else:
+                            apply_update(info, val); return
+                except queue.Empty:
+                    root.after(150, wait)
+            wait()
+
+        def fail(info, err):
+            dbg("update failed: %r" % (err,))
+            upd["busy"] = False
+            upd_lbl.config(text=f"Update failed - get v{info['ver']} from GitHub")
+            upd_lbl.bind("<Button-1>", lambda e: webbrowser.open(info["page"] or f"https://github.com/{REPO}/releases"))
+
+        def apply_update(info, new):
+            import subprocess, ctypes
+            try:
+                exe = swap_in_update(new)
+            except Exception as e:
+                try: os.remove(new)
+                except Exception: pass
+                fail(info, e); return
+            try:   # let the new copy past the single-instance check
+                ctypes.windll.kernel32.CloseHandle(single_instance.handle)
+            except Exception:
+                pass
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("_PYI", "_MEIPASS"))}
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"    # start as a fresh app, not a child of this one
+            try:
+                subprocess.Popen([exe], cwd=os.path.dirname(exe), env=env, close_fds=True,
+                                 creationflags=0x00000008 | 0x00000200)   # detached, own process group
+            except Exception as e:
+                fail(info, e); return
+            quit_app()
         root.after(3000, show_update)
     tick()
     root.mainloop()
